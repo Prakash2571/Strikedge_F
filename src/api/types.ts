@@ -455,6 +455,16 @@ export interface BoxOpenPosition {
   quantity: number;
   opened_at: string;
   margin: number | null;
+  /**
+   * WHICH model produced `margin` — broker-specific margin provenance.
+   *
+   * `kite_basket` and `dhan_multi` are position-aware NETTED figures.
+   * `dhan_per_leg_fallback` is a summed per-leg UPPER bound that materially over-states a
+   * hedged four-leg Box, so it must never be read as a basket margin. `unavailable` means
+   * a figure was requested and none obtained. `null` means the trade predates provenance
+   * capture — deliberately distinct from `unavailable`.
+   */
+  margin_source?: "kite_basket" | "dhan_multi" | "dhan_per_leg_fallback" | "unavailable" | null;
   entry_box_cost: number;
   entry_gross_edge: number;
   entry_charges: number | null;
@@ -569,6 +579,8 @@ export interface BoxTrade {
   legs: BoxTradeLeg[];
   box_width: number;
   margin: number | null;
+  /** Broker-specific margin provenance. See BoxOpenPosition.margin_source. */
+  margin_source?: "kite_basket" | "dhan_multi" | "dhan_per_leg_fallback" | "unavailable" | null;
   entry_box_cost: number;
   entry_gross_edge: number;
   entry_charges: TradeCharges | null;

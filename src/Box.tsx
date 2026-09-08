@@ -49,6 +49,7 @@ import BoxSoundToggle from "./BoxSoundToggle.tsx";
 import { useBoxSounds } from "./useBoxSounds.ts";
 import { BrokerStatusPanel } from "./BrokerStatusPanel.tsx";
 import { RuntimeStatusBanners } from "./RuntimeStatusBanners.tsx";
+import { marginProvenanceSuffix, marginOverstatesHedge } from "./marginProvenance.ts";
 
 interface Props {
   /**
@@ -1597,7 +1598,16 @@ export default function Box({ onLock }: Props) {
                           <td className="box-dim">{t.closed_at ? fmtDateTime(t.closed_at) : "-"}</td>
                           <td className="num box-dim">{duration(t.opened_at, t.closed_at)}</td>
                           <td><BrokerBadge broker={t.broker} /></td>
-                          <td className="num box-dim">{rupees(t.margin)}</td>
+                          <td
+                            className={`num box-dim${marginOverstatesHedge(t.margin_source) ? " box-warn" : ""}`}
+                            title={
+                              t.margin_source
+                                ? `Margin source${marginProvenanceSuffix(t.margin_source)}`
+                                : "Margin source not recorded for this trade"
+                            }
+                          >
+                            {rupees(t.margin)}
+                          </td>
                           <td className="num">{rupees(t.entry_box_cost)}</td>
                           <td className="num">{rupees(t.exit_box_value)}</td>
                           <td className="num box-dim">{rupees(t.entry_charges?.total ?? null)}</td>
@@ -1828,7 +1838,7 @@ function OpenBoxCard({
         <Metric label="Entry edge" value={rupees(p.entry_edge)} />
         <Metric label="Expected net (entry)" value={rupees(p.expected_net_profit)} />
         <Metric
-          label="Margin (all 4 legs)"
+          label={`Margin (all 4 legs)${marginProvenanceSuffix(p.margin_source)}`}
           value={p.margin === null ? "unpriced" : rupees(p.margin)}
         />
         <Metric label="Entry cost" value={rupees(p.entry_box_cost)} />
