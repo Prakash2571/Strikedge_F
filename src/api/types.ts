@@ -637,7 +637,7 @@ export interface BoxChainSymbol {
 }
 
 /** Which tier of the backend's closed-trade store answered a history request. */
-export type BoxHistorySource = "memory" | "redis" | "mongo" | "postgres" | "none";
+export type BoxHistorySource = "memory" | "postgres" | "none";
 
 export interface BoxHistoryResponse {
   dbEnabled: boolean;

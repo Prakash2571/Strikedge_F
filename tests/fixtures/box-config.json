@@ -1,0 +1,48 @@
+{
+    "min_expected_net_profit": 1200,
+    "min_gross_edge": 1200,
+    "min_net_edge": 0,
+    "execution_mode": "paper_latency",
+    "simulated_decision_ms": 40,
+    "simulated_latency_ms": 250,
+    "expected_entry_slippage": 250,
+    "expected_exit_slippage": 250,
+    "enable_short_box": true,
+    "directions": [
+        "LONG_BOX",
+        "SHORT_BOX"
+    ],
+    "min_captured_pct": 0.75,
+    "reconcile_charges": true,
+    "charge_reconcile_warn_pct": 5,
+    "require_priced_charges": true,
+    "safety_buffer": 150,
+    "quote_max_age_ms": 15000,
+    "feed_max_age_ms": 5000,
+    "underlying_max_age_ms": 10000,
+    "strikes_each_side": 3,
+    "strike_level": 3,
+    "max_strikes": 7,
+    "max_candidates_per_underlying": 21,
+    "prefilter_gross_threshold": 1200,
+    "convergence_floor": 200,
+    "convergence_pct": 0.2,
+    "min_exit_net_pnl": 600,
+    "profit_capture_pct": 0.75,
+    "expiry_safety_minutes": 45,
+    "max_subscribed_tokens": 2200,
+    "lots": 1,
+    "universe": "NSE F&O options only \u2014 F&O stocks + supported indices",
+    "indicative_discovery": true,
+    "closed_cache_enabled": false,
+    "tunable": {
+        "min_expected_net_profit": {
+            "min": 0,
+            "max": 1000000
+        },
+        "safety_buffer": {
+            "min": 0,
+            "max": 1000000
+        }
+    }
+}

@@ -22,6 +22,22 @@ did not exist anywhere in the backend — it was invented.
 
 A green build proved nothing about the contract. That is what these fixtures fix.
 
+## The existing Box endpoints are pinned too
+
+`box-status.json`, `box-execution-control.json` and `box-config.json` cover the endpoints
+ported near-verbatim from CalSpread. A mechanical diff confirmed those already matched — 81
+required frontend fields across the three, none missing — so unlike the table above these
+record a check that PASSED.
+
+They are pinned anyway, for two reasons. "It was copied from a working system" is exactly
+the reasoning that let the new endpoints drift undetected. And the persistence rewrite did
+touch these code paths: the trades-history `source` tier really did change from
+`memory|redis|mongo|none` to `memory|postgres|none`, which is asserted directly.
+
+`box-execution-control.json` additionally pins the shipped safety default: the captured
+response has `live_runtime_armed: false` and a non-`live` execution mode, so a fixture
+re-captured from an armed process would fail the suite.
+
 ## Provenance
 
 Captured on 2026-09-08 from `Strikedge_B` at commit `3e14d54` against a local PostgreSQL,
