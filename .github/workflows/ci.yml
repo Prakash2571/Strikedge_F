@@ -1,43 +1,222 @@
 name: CI
 
+# Every push to main and every pull request must install cleanly from a locked tree, typecheck /
+# build, pass ALL front-end tests, and then survive a set of static safety scans over the BUILT
+# bundle. The front-end build is a pure typecheck + bundle: it needs NO repository secret and
+# contacts NO broker, PostgreSQL, MongoDB, Redis or the market. That is exactly why the secret /
+# credential / localStorage scans below are meaningful — nothing legitimate in dist/ should carry a
+# backend secret name or stash a session token client-side.
+
 on:
   push:
     branches: [main]
   pull_request:
 
-# Read-only token, and no secrets: the build is a pure typecheck + bundle. It never
-# contacts a broker, PostgreSQL, MongoDB, Redis or the market.
+# Read-only token: this workflow reads the repo, builds it and scans the output. It writes nothing
+# back.
 permissions:
   contents: read
 
+# One in-flight run per ref; a newer push cancels the older run rather than queueing behind it.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Toolchain pinned EXPLICITLY by full version rather than by floating major, so a silent upstream
+# bump cannot change install/build behaviour under us. Node 22.23.2 (LTS "Jod") bundles npm 10.9.8;
+# the npm pin is applied anyway so a change to the bundled version cannot silently alter `npm ci`.
+# These match the backend repo's pins so the two repositories build on an identical toolchain.
+env:
+  NODE_VERSION: 22.23.2
+  NPM_VERSION: 11.4.2
+
 jobs:
   build:
-    name: Typecheck + build + test
+    name: Typecheck + build + test + bundle scans
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # actions/checkout and actions/setup-node bumped from @v4 (Node 20, now deprecated on the
+      # runners) to @v7 — the current major of each, which runs on Node 24. checkout v7 is v7.0.1
+      # (20 Jul 2026); setup-node v7 is v7.0.0 (14 Jul 2026). Both still accept the inputs used here
+      # (setup-node: node-version, cache: 'npm').
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
 
-      # `npm ci` fails if package-lock.json is out of sync with package.json, so this step
-      # doubles as the lockfile-in-sync check.
-      - name: Install (locked, lockfile must be in sync)
+      # Pin npm on top of the bundled version so `npm ci` behaviour is fixed regardless of what the
+      # Node build happens to ship.
+      - name: Pin npm
+        run: npm install -g npm@${{ env.NPM_VERSION }}
+
+      - name: Record toolchain versions
+        run: |
+          echo "node: $(node -v)"
+          echo "npm:  $(npm -v)"
+
+      # STRICT `npm ci`, with NO `npm install` fallback. `npm ci || npm install` would turn a
+      # lockfile that disagrees with package.json into a warning and a GREEN build. `npm ci` is the
+      # only install command, so a stale or incomplete lockfile now fails the pipeline.
+      - name: Install (strict npm ci, no install fallback)
         run: npm ci
 
-      # `npm run build` is `tsc -b && vite build`, so this one step both typechecks the app
-      # (strict, incl. noUnusedLocals / noUnusedParameters) and produces the bundle.
+      # `npm ci` already refuses a lockfile that disagrees with package.json. This additionally
+      # proves the install did not need to REWRITE the lockfile: if `npm ci` ever leaves the working
+      # tree dirty, the committed lockfile was not a faithful resolution.
+      - name: Lockfile must be complete and in sync
+        run: git diff --exit-code -- package-lock.json
+
+      # `npm run build` is `tsc -b && vite build`, so this one step both typechecks the app (strict,
+      # incl. noUnusedLocals / noUnusedParameters) and produces the bundle in dist/.
       - name: Build
         run: npm run build
 
-      # The access, transport, SSE-reconnect and Box sound logic is pure and has no DOM
-      # dependency, so it runs under node:test directly against the TypeScript sources
-      # (Node 22 strips types natively). No bundler or jsdom needed.
+      # A build that emitted nothing is a failure, not an empty success.
+      - name: Build output must exist
+        run: test -d dist && test -f dist/index.html && ls dist/assets/*.js >/dev/null
+
+      # The access, transport, SSE-reconnect and Box sound logic is pure and has no DOM dependency,
+      # so it runs under node:test directly against the TypeScript sources. No bundler or jsdom.
       - name: Test
         run: npm test
+
+      # ── Bundle secret scan ──────────────────────────────────────────────────────────────
+      #
+      # The front-end bundle is served to every visitor. It must NEVER carry a backend secret's
+      # NAME or VALUE. This has until now been checked only by hand; this step enforces it.
+      #
+      # We scan for the SECRET NAMES themselves, NOT for bare words like "passcode". The word
+      # "passcode" legitimately appears in UI copy ("Enter the site passcode") and as the
+      # request-body key `{ passcode }` posted to /api/access/verify, so matching the bare word
+      # would false-positive on correct code. The compound env-var names below
+      # (KITE_TOKEN_BROKER_PASSCODE, DHAN_TOKEN_BROKER_PASSCODE, …) do not appear in any legitimate
+      # UI string, so matching the full names is both precise and correct.
+      - name: Scan built bundle for backend secret names/values
+        run: |
+          set -euo pipefail
+          # Full secret names + sealed-token field names. Fixed strings (grep -F), so no regex
+          # metacharacter surprises.
+          patterns=(
+            SITE_ACCESS_SECRET
+            KITE_API_KEY
+            KITE_TOKEN_BROKER_PASSCODE
+            DHAN_TOKEN_BROKER_PASSCODE
+            BROKER_TOKEN_ENCRYPTION_KEY
+            DATABASE_URL
+            MONGODB_URI
+            TOKEN_ROUTE_SECRET
+            ADMIN_SECRET
+            encrypted_access_token
+            encryption_iv
+            encryption_auth_tag
+          )
+          # Scan the whole shipped tree (JS, CSS, HTML, source maps if any).
+          hits=0
+          for p in "${patterns[@]}"; do
+            if match="$(grep -rInF -- "$p" dist/ || true)"; then
+              if [ -n "$match" ]; then
+                echo "FAIL: secret name/value '${p}' found in the built bundle:"
+                echo "$match" | head -n 5
+                hits=$((hits + 1))
+              fi
+            fi
+          done
+          if [ "$hits" -ne 0 ]; then
+            echo ""
+            echo "${hits} secret name(s)/value(s) leaked into dist/. The front-end bundle is public;"
+            echo "no backend secret name or value may ship in it."
+            exit 1
+          fi
+          echo "OK: no backend secret names/values in the built bundle."
+
+      # ── No committed .env / credential files ────────────────────────────────────────────
+      #
+      # Fails if a real .env or an obvious credential/key file was accidentally committed. This repo
+      # has NO .env.example, so NOTHING is allow-listed — any tracked .env* or key file is a fault.
+      - name: No committed env/credential files
+        run: |
+          set -euo pipefail
+          # Only TRACKED files, so build output or local scratch cannot cause a false alarm.
+          offenders="$(git ls-files \
+            | grep -E '(^|/)\.env($|\.[^/]*$)|(^|/)(credentials|secrets)\.(json|ya?ml|txt)$|\.(pem|key|pfx|p12)$' \
+            || true)"
+          if [ -n "${offenders}" ]; then
+            echo "FAIL: the repository contains committed env/credential files:"
+            echo "${offenders}"
+            exit 1
+          fi
+          echo "OK: no committed .env or credential files (this repo ships none, and allows none)."
+
+      # ── No session token in localStorage ──────────────────────────────────────────────────
+      #
+      # StrikeEdge's session lives ONLY in an HttpOnly, same-origin cookie; the front end never
+      # reads or writes a session token in localStorage (see src/api/http.ts, src/auth/AccessGate.tsx).
+      # A `localStorage.setItem` of a session/token key in the built bundle would be a real security
+      # regression — exactly the pattern the old CalSpread front end used and StrikeEdge removed.
+      #
+      # The bundle DOES use localStorage, but only for two benign UI preferences whose exact keys are
+      # read from source:
+      #     strikedge_theme               (src/ThemeToggle.tsx  — light/dark theme)
+      #     calspread:box:sound-enabled   (src/lib/boxSounds.ts — Box sound on/off)
+      # These are the ONLY allowed keys. The check resolves every key passed to localStorage
+      # get/setItem (whether an inline string literal or a minified variable holding one) and fails
+      # if any resolved key is not one of the two above — so it cannot false-positive on the theme /
+      # sound keys, and it catches a newly-introduced session/token key regardless of what the
+      # minifier renames the variable to.
+      - name: Assert no session token is stored in localStorage
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import { readFileSync, readdirSync } from "node:fs";
+          import path from "node:path";
+
+          const ALLOWED = new Set(["strikedge_theme", "calspread:box:sound-enabled"]);
+          const dir = "dist/assets";
+          const files = readdirSync(dir).filter((f) => f.endsWith(".js"));
+          let failed = false;
+
+          for (const file of files) {
+            const src = readFileSync(path.join(dir, file), "utf8");
+            // Every localStorage.getItem/setItem first argument: a string literal or an identifier.
+            const callRe = /localStorage\.(?:get|set)Item\(\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[A-Za-z_$][\w$]*)/g;
+            let m;
+            while ((m = callRe.exec(src)) !== null) {
+              const arg = m[1];
+              let key = null;
+              if (arg[0] === '"' || arg[0] === "'") {
+                // Inline string literal key.
+                key = arg.slice(1, -1);
+              } else {
+                // Minified variable — resolve `<name>="..."` (or '...') in the same file.
+                const defRe = new RegExp(
+                  "(?:^|[;,{ (])" + arg.replace(/[$]/g, "\\$") +
+                    "\\s*=\\s*(\"(?:[^\"\\\\]|\\\\.)*\"|'(?:[^'\\\\]|\\\\.)*')",
+                );
+                const def = defRe.exec(src);
+                if (def) key = def[1].slice(1, -1);
+              }
+              if (key === null) {
+                console.error(
+                  `FAIL: ${file}: could not resolve a localStorage key at a get/setItem call ` +
+                    `(argument: ${arg}). Refusing to pass a localStorage key I cannot verify.`,
+                );
+                failed = true;
+                continue;
+              }
+              if (!ALLOWED.has(key)) {
+                console.error(
+                  `FAIL: ${file}: localStorage key "${key}" is not on the allow-list. ` +
+                    `The session lives in an HttpOnly cookie; no session/token key may be stored ` +
+                    `client-side. Allowed keys: ${[...ALLOWED].join(", ")}.`,
+                );
+                failed = true;
+              } else {
+                console.log(`OK: ${file}: localStorage key "${key}" is allow-listed.`);
+              }
+            }
+          }
+          if (failed) process.exit(1);
+          console.log("OK: no session/token key is stored in localStorage.");
+          NODE
