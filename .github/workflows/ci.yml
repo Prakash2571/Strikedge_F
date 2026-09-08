@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Read-only token, and no secrets: the build is a pure typecheck + bundle. It never
+# contacts a broker, PostgreSQL, MongoDB, Redis or the market.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Typecheck + build + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      # `npm ci` fails if package-lock.json is out of sync with package.json, so this step
+      # doubles as the lockfile-in-sync check.
+      - name: Install (locked, lockfile must be in sync)
+        run: npm ci
+
+      # `npm run build` is `tsc -b && vite build`, so this one step both typechecks the app
+      # (strict, incl. noUnusedLocals / noUnusedParameters) and produces the bundle.
+      - name: Build
+        run: npm run build
+
+      # The access, transport, SSE-reconnect and Box sound logic is pure and has no DOM
+      # dependency, so it runs under node:test directly against the TypeScript sources
+      # (Node 22 strips types natively). No bundler or jsdom needed.
+      - name: Test
+        run: npm test
