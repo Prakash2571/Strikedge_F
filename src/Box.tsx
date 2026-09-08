@@ -834,7 +834,7 @@ export default function Box({ onLock }: Props) {
 
       {/* Broker status for BOTH stored sessions — active + standby — with guarded
           selection and switch-blocker display. */}
-      <BrokerStatusPanel />
+      <BrokerStatusPanel runtime={runtime} />
 
       {/* Plain-language whole-system readiness, without exposing any secret. */}
       <RuntimeStatusBanners runtime={runtime} exportStatus={exportStatus} />

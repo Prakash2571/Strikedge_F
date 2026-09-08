@@ -1,22 +1,51 @@
 /**
  * Plain-language readiness banners for the Box dashboard.
  *
- * Surfaces the whole-system state the specification enumerates — WITHOUT ever exposing a
- * secret. Every line is a report of a boolean the backend published on /api/runtime/status
- * and /api/export/status; nothing here reveals a token, a passcode or any credential.
+ * WHY THIS FILE WAS REWRITTEN
+ * It previously read pre-computed booleans — `runtime.token_waiting`,
+ * `instruments_loading`, `websocket_connecting`, `depth_ready`, `postgres_available`,
+ * `live_entry_blocked`, `recovery_active`, and `exportStatus.delayed`/`lag_seconds` —
+ * none of which the backend has ever sent. Every one was optional in the type, so the
+ * project typechecked, built and passed its tests while EVERY banner stayed dark in
+ * production. The dashboard would have looked healthy while waiting for a token.
  *
- * The states, in the order they matter operationally:
- *   • waiting for today's CalSpread/broker token
- *   • token acquired, instruments still loading
- *   • market-data WebSocket connecting
- *   • connected, but executable depth not ready
- *   • PostgreSQL persistence unavailable  (authoritative store — this is serious)
- *   • Mongo reporting export delayed       (async replica — expected, non-fatal)
- *   • live entry blocked
- *   • recovery in progress / residual exposure exists
+ * The backend reports FACTS (per-broker token state, feed connection, depth age,
+ * `pg_ready`, `live_entry.reasons`, outbox backlog). The phrasing is this component's
+ * job, so the banners are DERIVED here and each derivation is stated explicitly below.
+ * Nothing is invented: where the backend cannot distinguish two situations, this says so
+ * rather than guessing.
+ *
+ * Two states the old shape could not express are now shown:
+ *   • a token-provider CONFIGURATION ERROR (passcode rejected / identity mismatch) — a
+ *     fatal blocker that polling will not fix, previously indistinguishable from "waiting";
+ *   • DEAD-LETTERED projections — a reporting row that gave up, previously invisible.
+ *
+ * And `live_entry.reasons` is now displayed, so "live entry is blocked" finally says why.
+ *
+ * NO SECRET IS RENDERED. `last_error` is bounded and redacted by the backend; there is no
+ * token, passcode or ciphertext field in either payload.
  */
 
-import type { ExportStatus, RuntimeStatus } from "./api/types.ts";
+import type { BrokerTokenRuntime, ExportStatus, RuntimeStatus } from "./api/types.ts";
+
+type Banner = { key: string; kind: "info" | "warn" | "error"; text: string };
+
+/** Human wording for a machine-readable live-entry reason. Unknown codes pass through. */
+const ENTRY_REASON_TEXT: Record<string, string> = {
+  box_live_trading_disabled: "BOX_LIVE_TRADING_ENABLED is false",
+  zerodha_live_trading_disabled: "ZERODHA_LIVE_TRADING_ENABLED is false",
+  dhan_live_trading_disabled: "DHAN_LIVE_TRADING_ENABLED is false",
+  postgres_unavailable: "PostgreSQL is unavailable",
+  reconciliation_incomplete: "reconciliation is incomplete",
+  active_broker_token_not_ready: "the active broker has no valid token yet",
+};
+
+function describeEntryReason(code: string): string {
+  if (ENTRY_REASON_TEXT[code]) return ENTRY_REASON_TEXT[code];
+  // The backend emits `execution_mode_<mode>` for anything that is not live.
+  const mode = code.startsWith("execution_mode_") ? code.slice("execution_mode_".length) : null;
+  return mode ? `execution mode is ${mode} (not live)` : code.replace(/_/g, " ");
+}
 
 export function RuntimeStatusBanners({
   runtime,
@@ -25,75 +54,130 @@ export function RuntimeStatusBanners({
   runtime: RuntimeStatus | null;
   exportStatus: ExportStatus | null;
 }) {
-  const banners: { key: string; kind: "info" | "warn" | "error"; text: string }[] = [];
+  const banners: Banner[] = [];
 
   if (runtime) {
-    if (runtime.token_waiting) {
-      banners.push({
-        key: "token",
-        kind: "info",
-        text: "Waiting for today's broker token — market data cannot flow until the active broker is connected.",
-      });
-    } else if (runtime.instruments_loading) {
-      banners.push({
-        key: "instruments",
-        kind: "info",
-        text: "Token acquired — loading the instrument master. Opportunities appear once instruments are ready.",
-      });
-    } else if (runtime.websocket_connecting) {
-      banners.push({
-        key: "ws",
-        kind: "info",
-        text: "Market-data WebSocket is connecting…",
-      });
-    } else if (runtime.depth_ready === false) {
-      banners.push({
-        key: "depth",
-        kind: "warn",
-        text: "Connected, but executable depth is not ready across the universe yet — entries wait for a full four-leg one-lot book.",
-      });
+    const active: BrokerTokenRuntime | undefined = runtime.brokers.find(
+      (b) => b.broker === runtime.active_broker,
+    );
+
+    if (active) {
+      if (active.token_state === "configuration_error") {
+        // NOT the same as "waiting": the provider rejected the passcode or the expected
+        // identity did not match, so retrying on a timer will never succeed. It needs an
+        // operator, which is why this is an error rather than an info.
+        banners.push({
+          key: "token-config",
+          kind: "error",
+          text:
+            `Token-provider configuration error for ${active.broker}` +
+            (active.last_error ? `: ${active.last_error}` : "") +
+            ". Polling has stopped for this broker — this will not clear on its own.",
+        });
+      } else if (active.token_state === "invalid") {
+        banners.push({
+          key: "token-invalid",
+          kind: "error",
+          text: `The ${active.broker} token was rejected. New entry is blocked; open positions are still monitored and can still exit.`,
+        });
+      } else if (active.token_state !== "ready") {
+        // waiting (before the poll start) or polling (actively retrying).
+        banners.push({
+          key: "token",
+          kind: "info",
+          text:
+            `Waiting for today's ${active.broker} token${active.ist_day ? ` (${active.ist_day} IST)` : ""} — ` +
+            "market data cannot flow until the active broker is connected.",
+        });
+      } else if (!active.feed_connected) {
+        // Token is ready but no socket yet. The backend does not separate "loading the
+        // instrument master" from "socket connecting", so this deliberately covers both
+        // rather than claiming to know which.
+        banners.push({
+          key: "feed",
+          kind: "info",
+          text: "Token acquired — loading instruments and connecting the market-data WebSocket. Opportunities appear once depth arrives.",
+        });
+      } else if (active.last_depth_age_ms === null) {
+        banners.push({
+          key: "depth",
+          kind: "warn",
+          text: "Connected, but no authoritative depth has arrived yet — entries wait for a full four-leg one-lot book.",
+        });
+      }
     }
 
     // PostgreSQL is the authoritative operational store: its loss is an ERROR, not a note.
-    if (runtime.postgres_available === false) {
+    if (!runtime.pg_ready) {
       banners.push({
         key: "pg",
         kind: "error",
-        text: "PostgreSQL persistence is unavailable — the authoritative operational store cannot be written, so no new box can be recorded and live entry fails closed.",
+        text: "PostgreSQL is unavailable — the authoritative operational store cannot be written, so no new box can be recorded and live entry fails closed. Exits, protective cancellation and reconciliation are unaffected.",
       });
     }
 
-    if (runtime.live_entry_blocked) {
+    if (runtime.migration_state.pending > 0) {
+      banners.push({
+        key: "migrations",
+        kind: "error",
+        text: `${runtime.migration_state.pending} PostgreSQL migration(s) are pending — the schema is behind the code.`,
+      });
+    }
+
+    if (runtime.live_entry.blocked) {
+      // The reasons list is the point: "blocked" without a cause is not actionable.
+      const why = runtime.live_entry.reasons.map(describeEntryReason).join("; ");
       banners.push({
         key: "entry",
         kind: "warn",
-        text: "Live entry is currently blocked. Open positions are still monitored and can still exit.",
+        text:
+          `Live entry is blocked${why ? ` — ${why}` : ""}. ` +
+          "Open positions are still monitored and can still exit.",
       });
     }
 
-    if (runtime.recovery_active || runtime.residual_exposure) {
+    if (runtime.residual_exposure) {
+      banners.push({
+        key: "residual",
+        kind: "warn",
+        text: "Residual exposure exists — a partial fill left legs outstanding and is being reconciled. New entry stays closed until it is flat.",
+      });
+    } else if (runtime.recovery_pending || !runtime.recovery_ready) {
       banners.push({
         key: "recovery",
         kind: "warn",
-        text: runtime.residual_exposure
-          ? "Residual exposure exists — a partial fill left legs outstanding and is being reconciled. New entry stays closed until it is flat."
-          : "A recovery is in progress — exposure is quarantined pending reconciliation. Reduction continues; new entry is closed.",
+        text: "Recovery is in progress — unresolved broker state is being reconciled. Reduction continues; new entry is closed.",
       });
     }
   }
 
-  // The Mongo reporting replica is now non-authoritative and fed asynchronously, so a lag
+  // The Mongo reporting replica is non-authoritative and fed asynchronously, so a backlog
   // is expected and reported calmly — never as a failure of the operational store.
-  if (exportStatus?.delayed) {
-    const lag =
-      exportStatus.lag_seconds != null
-        ? ` (about ${Math.round(exportStatus.lag_seconds)}s behind)`
-        : "";
-    banners.push({
-      key: "mongo",
-      kind: "info",
-      text: `Mongo reporting export is delayed${lag}. This is the async reporting replica only — operational data in PostgreSQL is unaffected.`,
-    });
+  if (exportStatus?.enabled) {
+    if (exportStatus.dead_letter_count > 0) {
+      // A projection that gave up. Operational data is still correct in PostgreSQL, but
+      // reporting is now incomplete and will stay that way until someone replays it.
+      banners.push({
+        key: "mongo-dead",
+        kind: "warn",
+        text: `${exportStatus.dead_letter_count} reporting projection(s) dead-lettered — history in MongoDB is incomplete until replayed (npm run outbox:replay). PostgreSQL is unaffected.`,
+      });
+    }
+    if (exportStatus.backlog_count > 0) {
+      const age = exportStatus.oldest_pending_age_ms;
+      const lag = age != null ? ` (oldest about ${Math.round(age / 1000)}s old)` : "";
+      banners.push({
+        key: "mongo",
+        kind: "info",
+        text: `Mongo reporting export is behind by ${exportStatus.backlog_count} record(s)${lag}. This is the async reporting replica only — operational data in PostgreSQL is unaffected.`,
+      });
+    } else if (!exportStatus.connected) {
+      banners.push({
+        key: "mongo-down",
+        kind: "info",
+        text: "Mongo reporting replica is not connected. Reporting is delayed; nothing operational is blocked, and the backlog is durable in PostgreSQL.",
+      });
+    }
   }
 
   if (banners.length === 0) return null;

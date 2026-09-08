@@ -871,28 +871,71 @@ export interface FeedHealthView {
   detail: string;
 }
 
-export interface BrokerStatus {
+/**
+ * One broker's redacted session, as published inside GET /api/broker/status.
+ *
+ * VERIFIED AGAINST THE RUNNING BACKEND. This replaces a CalSpread-shaped
+ * `BrokerSession` (`authenticated`, `client_id`, `client_name`, `token_expires_at`,
+ * `token_expired`, `login_day`, `login_at`) that StrikeEdge's backend never sends: it
+ * deliberately RE-PROJECTS the internal state so a future internal field cannot
+ * silently become public.
+ *
+ * `account_label` is already redacted by the backend (last four characters, rest
+ * masked). There is no token, ciphertext, IV or auth-tag field to render, by design.
+ */
+export interface BrokerSessionView {
   broker: BrokerId;
-  generation?: number;
-  feed?: FeedHealthView;
-  subscriptions?: {
-    browser: number;
-    scanner: number;
-    strategy: number;
-    analytics: number;
-    tokens: number;
-    leases: number;
-  };
-  instruments?: number;
-  instruments_loaded_at?: number | null;
-  session: BrokerSession;
-  health: BrokerHealth;
-  dhan_configured: boolean;
-  dhan_instruments: number;
-  dhan_instruments_loaded_at: number | null;
-  dhan_static_ip?: DhanStaticIpState;
-  /** Which broker priced the most recent margin call — margin provenance. */
-  last_margin_source?: string | null;
+  connected: boolean;
+  /** waiting | ready | standby | expired — "standby" means a valid token, not active. */
+  state: "waiting" | "ready" | "standby" | "expired";
+  account_label: string | null;
+  established_at: string | null;
+  expires_at: string | null;
+}
+
+/** One broker's health, as published inside GET /api/broker/status. */
+export interface BrokerHealthView {
+  broker: BrokerId;
+  authenticated: boolean;
+  /** Quote/instrument access is usable. */
+  data_ready: boolean;
+  /** Live order placement is permitted AND possible. */
+  trading_ready: boolean;
+  /** Operator-facing reasons, e.g. "Static IP not configured". */
+  problems: string[];
+}
+
+/**
+ * GET /api/broker/status.
+ *
+ * The previous shape here described a SINGLE broker with required `dhan_configured`,
+ * `dhan_instruments` and `dhan_instruments_loaded_at` fields — a CalSpread response the
+ * StrikeEdge backend does not produce. It actually returns BOTH brokers in an array,
+ * which is what makes "active vs standby" renderable at all. Because the old fields were
+ * required-but-absent they were `undefined` at runtime while still typechecking.
+ *
+ * Verified against a real response; see `tests/fixtures/broker-status.json`.
+ */
+export interface BrokerStatus {
+  active_broker: BrokerId;
+  /** Monotonic durable broker generation. Never resets, not even across a restart. */
+  generation: number;
+  /** Exactly one entry per supported broker. */
+  brokers: { broker: BrokerId; session: BrokerSessionView; health: BrokerHealthView }[];
+}
+
+/** GET /api/broker/switch-blockers?broker=… — an empty list means the switch is allowed. */
+export interface BrokerSwitchBlockersResponse {
+  broker: BrokerId;
+  /** Machine-readable reasons, e.g. "broker_not_configured", "open_position". */
+  blockers: string[];
+}
+
+/** POST /api/broker/select — `ok: false` carries the exact refusal reasons. */
+export interface BrokerSelectResponse {
+  ok: boolean;
+  broker: BrokerId;
+  blockers: string[];
 }
 
 /* ======================= Runtime + export status readouts ===================== */
@@ -905,38 +948,82 @@ export interface BrokerStatus {
  * "PostgreSQL persistence unavailable", …) and must degrade gracefully on an older backend
  * that omits a field. NO secret name or value ever appears here.
  */
+/**
+ * Per-broker token/feed state, as published inside GET /api/runtime/status.
+ *
+ * VERIFIED AGAINST THE RUNNING BACKEND, not inferred. The previous version of this file
+ * described a shape the backend never sent (`token_waiting`, `instruments_loading`,
+ * `websocket_connecting`, `depth_ready`, `postgres_available`, `live_entry_blocked`,
+ * `recovery_active`) and every field was optional — so it typechecked, built and passed
+ * tests while every readiness banner silently stayed dark in production. The field names
+ * below are copied from an actual response; see `tests/fixtures/runtime-status.json`.
+ *
+ * NO SECRET APPEARS HERE. `last_error` is bounded and redacted by the backend, and there
+ * is deliberately no token, passcode or ciphertext field to render.
+ */
+export interface BrokerTokenRuntime {
+  broker: BrokerId;
+  /** waiting | polling | ready | invalid | configuration_error */
+  token_state: "waiting" | "polling" | "ready" | "invalid" | "configuration_error";
+  /** The IST trading day the state refers to, e.g. "2026-09-08". */
+  ist_day: string | null;
+  last_attempt_at: string | null;
+  last_success_at: string | null;
+  /** Short, redacted. Never a token or a passcode. */
+  last_error: string | null;
+  feed_connected: boolean;
+  wanted_token_count: number;
+  subscribed_token_count: number;
+  /** Age of the newest authoritative depth, or null when none has arrived. */
+  last_depth_age_ms: number | null;
+  reconnect_count: number;
+}
+
+/**
+ * Whole-system readiness (GET /api/runtime/status).
+ *
+ * The banners are DERIVED from these fields rather than read from pre-computed booleans,
+ * because the backend reports facts and the UI decides how to phrase them. Notably
+ * `live_entry.reasons` is a real list the backend supplies — the old shape had nowhere to
+ * put it, so the operator was told "live entry is blocked" without being told why.
+ */
 export interface RuntimeStatus {
-  /** Today's broker token has not yet been acquired for the active broker. */
-  token_waiting?: boolean;
-  /** Token acquired, but the instrument master is still loading. */
-  instruments_loading?: boolean;
-  /** The market-data WebSocket is mid-connect. */
-  websocket_connecting?: boolean;
-  /** Connected, but executable depth is not yet ready across the universe. */
-  depth_ready?: boolean;
-  /** PostgreSQL — the authoritative operational store — is reachable and writable. */
-  postgres_available?: boolean;
-  /** Live entry is currently blocked (by risk, session, feed or persistence). */
-  live_entry_blocked?: boolean;
-  /** A recovery is in progress or residual exposure exists. */
-  recovery_active?: boolean;
-  residual_exposure?: boolean;
-  detail?: string | null;
+  brokers: BrokerTokenRuntime[];
+  active_broker: BrokerId | null;
+  /** PostgreSQL — the authoritative operational store — is up. */
+  pg_ready: boolean;
+  migration_state: { applied: number; pending: number };
+  /** Restart recovery and reconciliation have completed. */
+  recovery_ready: boolean;
+  live_entry: { blocked: boolean; reasons: string[] };
+  /** Unresolved/unknown broker orders are being reconciled. */
+  recovery_pending: boolean;
+  /** A partial fill left legs outstanding. */
+  residual_exposure: boolean;
 }
 
 /**
  * The async reporting-replica status (GET /api/export/status).
  *
- * MongoDB Atlas is now a NON-authoritative reporting replica fed asynchronously from
- * PostgreSQL, so a lag here is expected and non-fatal — the UI reports it without alarm.
+ * MongoDB Atlas is a NON-authoritative reporting replica fed asynchronously from the
+ * PostgreSQL outbox, so a backlog here is expected and non-fatal — the UI reports it
+ * without alarm. A DEAD-LETTERED row is different: it means a projection gave up, and the
+ * old shape had no field for it, so it was invisible.
+ *
+ * Field names verified against a real response; see `tests/fixtures/export-status.json`.
  */
 export interface ExportStatus {
-  /** Whether the Mongo reporting replica is configured at all. */
-  enabled?: boolean;
-  /** True when the async export is behind — reporting is delayed, operations unaffected. */
-  delayed?: boolean;
-  /** Seconds the replica is behind the authoritative store, if known. */
-  lag_seconds?: number | null;
-  last_export_at?: string | null;
-  detail?: string | null;
+  /** False when MONGO_EXPORT_ENABLED=false or MONGODB_URI is unset. */
+  enabled: boolean;
+  /** Whether the projector currently holds a live Mongo connection. */
+  connected: boolean;
+  /** Unpublished, non-dead-lettered rows still waiting to drain. */
+  backlog_count: number;
+  /** Age of the oldest pending row, or null when the backlog is empty. */
+  oldest_pending_age_ms: number | null;
+  last_success_at: string | null;
+  /** Bounded and secret-free. */
+  last_error: string | null;
+  /** Rows that exhausted their attempt budget. Non-zero needs an operator. */
+  dead_letter_count: number;
 }

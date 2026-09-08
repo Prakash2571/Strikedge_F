@@ -23,7 +23,8 @@ import type {
   BoxSessionView,
   BrokerId,
   BrokerStatus,
-  BrokerSwitchBlocker,
+  BrokerSwitchBlockersResponse,
+  BrokerSelectResponse,
   ExportStatus,
   RuntimeStatus,
 } from "./types.ts";
@@ -257,8 +258,8 @@ export async function fetchBrokerStatus(): Promise<BrokerStatus> {
 /** Why a switch to `broker` would be refused right now, without attempting it. */
 export async function fetchBrokerSwitchBlockers(
   broker: BrokerId,
-): Promise<{ broker: BrokerId; blockers: BrokerSwitchBlocker[] }> {
-  return request<{ broker: BrokerId; blockers: BrokerSwitchBlocker[] }>(
+): Promise<BrokerSwitchBlockersResponse> {
+  return request<BrokerSwitchBlockersResponse>(
     `/api/broker/switch-blockers?broker=${encodeURIComponent(broker)}`,
     "Failed to check the broker switch",
   );
@@ -268,9 +269,9 @@ export async function fetchBrokerSwitchBlockers(
  * Switch the active broker. Throws with the backend's 409 message and attaches the blockers
  * so the UI can list every reason the switch was refused, not one at a time.
  */
-export async function selectBroker(broker: BrokerId): Promise<BrokerStatus> {
+export async function selectBroker(broker: BrokerId): Promise<BrokerSelectResponse> {
   try {
-    return await request<BrokerStatus>("/api/broker/select", "Failed to select the broker", {
+    return await request<BrokerSelectResponse>("/api/broker/select", "Failed to select the broker", {
       method: "POST",
       body: { broker },
     });

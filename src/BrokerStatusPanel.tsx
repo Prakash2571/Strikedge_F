@@ -6,29 +6,45 @@
  * are always shown so the operator can see standby readiness and every reason a switch is
  * refused.
  *
+ * WHY THIS FILE WAS REWRITTEN
+ * It was written against a CalSpread-shaped `GET /api/broker/status` that StrikeEdge's
+ * backend does not produce. Verified against a running backend, the real response is
+ *   { active_broker, generation, brokers: [{ broker, session, health }, …] }
+ * whereas this component read `status.broker`, `status.session`, `status.health`,
+ * `status.feed`, `status.dhan_configured`, `status.dhan_instruments`,
+ * `status.dhan_static_ip` and `status.last_margin_source`. Only the first three had any
+ * counterpart at all, and `last_margin_source` exists nowhere in the backend — it was
+ * invented. It also assumed `blockers` was an array of `{reason, detail}` objects and that
+ * `POST /api/broker/select` returned a status; the backend returns `string[]` and
+ * `{ ok, broker, blockers }`.
+ *
+ * Because the old types made those fields optional-or-absent, the project typechecked and
+ * built while this panel would have rendered `undefined` in production. The types are now
+ * exact, which is what surfaced all of it as compiler errors.
+ *
  * ABSOLUTE RULES
  *   • NEVER render a raw token, encrypted token, passcode or any encryption metadata. There
- *     is no "copy access token" affordance anywhere in this component.
- *   • Session vs feed are reported SEPARATELY, and neither is derived from the site
+ *     is no "copy access token" affordance anywhere in this component. `account_label` is
+ *     already redacted server-side.
+ *   • Session and feed are reported SEPARATELY, and neither is derived from the site
  *     passcode: "active" means the broker session is usable, not that someone unlocked the
  *     app.
  *   • Broker selection is guarded: it posts {"broker": …} and, on refusal, lists every
  *     blocker the backend returns.
+ *
+ * FEED STATE comes from `GET /api/runtime/status`, not from this endpoint — the broker
+ * status deliberately carries no feed field. It is passed in as a prop so there is one
+ * source of truth and no second poll.
  */
 
 import { useCallback, useEffect, useState } from "react";
-import {
-  fetchBrokerStatus,
-  fetchBrokerSwitchBlockers,
-  selectBroker,
-} from "./api/box.ts";
+import { fetchBrokerStatus, fetchBrokerSwitchBlockers, selectBroker } from "./api/box.ts";
 import type {
-  BrokerHealth,
+  BrokerHealthView,
   BrokerId,
-  BrokerSession,
+  BrokerSessionView,
   BrokerStatus,
-  BrokerSwitchBlocker,
-  FeedHealthView,
+  RuntimeStatus,
 } from "./api/types.ts";
 
 /**
@@ -39,59 +55,85 @@ const DHAN_HOLDS_EXPOSURE_MESSAGE =
   "Dhan remains active because it owns exposure or unresolved broker state. " +
   "Zerodha cannot become active until Dhan is safely flat and reconciled.";
 
-/** A Zerodha token-state label, derived only from the readiness the backend reports. */
-function zerodhaTokenState(session: BrokerSession, health: BrokerHealth): string {
-  if (health.problems.some((p) => /config/i.test(p))) return "configuration_error";
-  if (!session.authenticated) return "token waiting";
-  if (session.token_expired) return "invalid";
-  return "ready";
-}
+const BROKERS: BrokerId[] = ["zerodha", "dhan"];
 
-/** A Dhan token-state label. Dhan tokens expire, so it has an extra couple of states. */
-function dhanTokenState(session: BrokerSession | null, health: BrokerHealth): string {
-  if (health.problems.some((p) => /config/i.test(p))) return "configuration_error";
-  if (!session || !session.authenticated) return "token waiting";
-  if (session.token_expired) return "expired";
-  if (session.token_expires_at === null) return "unknown expiry";
-  return "ready";
-}
-
-function feedLabel(feed: FeedHealthView | undefined, active: boolean): string {
-  if (!active) return "standby";
-  if (!feed) return "—";
-  return feed.state;
-}
-
-function whenDate(ts: number | null): string {
-  if (ts === null) return "—";
-  const d = new Date(ts);
-  return Number.isNaN(d.getTime()) ? "—" : d.toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
+/**
+ * The operator-facing token state.
+ *
+ * The backend already computes a `session.state` of waiting | ready | standby | expired.
+ * A CONFIGURATION ERROR is not one of those — it surfaces in `health.problems` — and it
+ * matters more than any of them, because polling will never clear it. So it is checked
+ * first and never collapsed into "waiting".
+ */
+function tokenStateLabel(
+  session: BrokerSessionView,
+  health: BrokerHealthView,
+  active: boolean,
+): string {
+  if (health.problems.some((p) => /not configured|configuration/i.test(p))) {
+    return "configuration error";
+  }
+  switch (session.state) {
+    case "expired":
+      return "token expired";
+    case "ready":
+      return active ? "ready" : "ready — standby";
+    case "standby":
+      return "ready — standby";
+    case "waiting":
+    default:
+      return "token waiting";
+  }
 }
 
 /**
- * Redact a client identity to a short, non-identifying tail. NEVER shows the whole account
- * number. e.g. "…4821".
+ * Dhan's expiry is its own contract: an explicit future timestamp is honoured, and a NULL
+ * expiry means UNKNOWN — never "never expires". That distinction is shown rather than
+ * flattened, because an operator treating unknown as permanent is the failure mode.
  */
-function redactIdentity(id: string | null): string {
-  if (!id) return "—";
-  const trimmed = id.trim();
-  if (trimmed.length <= 4) return `…${trimmed}`;
-  return `…${trimmed.slice(-4)}`;
+function expiryLabel(broker: BrokerId, session: BrokerSessionView): string {
+  if (session.expires_at) return `Expires ${whenIso(session.expires_at)}`;
+  if (broker === "dhan") {
+    return session.state === "waiting" ? "Expiry —" : "Expiry unknown (validated on use)";
+  }
+  return session.established_at ? `Established ${whenIso(session.established_at)}` : "Login —";
 }
 
-export function BrokerStatusPanel() {
+function whenIso(iso: string | null): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime())
+    ? "—"
+    : d.toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
+}
+
+/** Feed state for a broker, from the runtime status. Only the ACTIVE broker has a feed. */
+function feedLabel(runtime: RuntimeStatus | null, broker: BrokerId, active: boolean): string {
+  if (!active) return "standby — no socket";
+  const r = runtime?.brokers.find((b) => b.broker === broker);
+  if (!r) return "—";
+  if (!r.feed_connected) return "connecting";
+  if (r.last_depth_age_ms === null) return "connected — no depth yet";
+  return `live — depth ${Math.round(r.last_depth_age_ms)}ms, ${r.subscribed_token_count}/${r.wanted_token_count} tokens`;
+}
+
+/** Turn a machine-readable blocker code into something an operator can act on. */
+function blockerText(code: string): string {
+  return code.replace(/_/g, " ");
+}
+
+export function BrokerStatusPanel({ runtime }: { runtime?: RuntimeStatus | null }) {
   const [status, setStatus] = useState<BrokerStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [switching, setSwitching] = useState<BrokerId | null>(null);
-  const [blockers, setBlockers] = useState<Record<BrokerId, BrokerSwitchBlocker[]>>({
+  const [blockers, setBlockers] = useState<Record<BrokerId, string[]>>({
     zerodha: [],
     dhan: [],
   });
 
   const load = useCallback(async () => {
     try {
-      const s = await fetchBrokerStatus();
-      setStatus(s);
+      setStatus(await fetchBrokerStatus());
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load the broker status.");
@@ -101,12 +143,13 @@ export function BrokerStatusPanel() {
   // Pre-fetch the switch blockers for the INACTIVE broker(s) so the panel can pre-warn
   // WITHOUT the operator having to attempt a refused switch first.
   const loadBlockers = useCallback(async (active: BrokerId) => {
-    const others: BrokerId[] = (["zerodha", "dhan"] as BrokerId[]).filter((b) => b !== active);
+    const others = BROKERS.filter((b) => b !== active);
     const results = await Promise.allSettled(others.map((b) => fetchBrokerSwitchBlockers(b)));
     setBlockers((prev) => {
       const next = { ...prev };
       results.forEach((r, i) => {
-        if (r.status === "fulfilled") next[others[i]] = r.value.blockers;
+        const broker = others[i];
+        if (r.status === "fulfilled" && broker) next[broker] = r.value.blockers;
       });
       return next;
     });
@@ -119,7 +162,7 @@ export function BrokerStatusPanel() {
   }, [load]);
 
   useEffect(() => {
-    if (status) void loadBlockers(status.broker);
+    if (status) void loadBlockers(status.active_broker);
   }, [status, loadBlockers]);
 
   const onSelect = useCallback(
@@ -127,18 +170,24 @@ export function BrokerStatusPanel() {
       setSwitching(broker);
       setError(null);
       try {
-        const next = await selectBroker(broker);
-        setStatus(next);
-        await loadBlockers(next.broker);
+        const result = await selectBroker(broker);
+        if (!result.ok) {
+          // A REFUSAL IS NOT AN EXCEPTION. The backend answers with the exact blocker list,
+          // so show all of them at once rather than one message at a time.
+          setBlockers((prev) => ({ ...prev, [broker]: result.blockers }));
+          setError(
+            `Switch to ${broker} refused: ${result.blockers.map(blockerText).join("; ") || "unknown reason"}`,
+          );
+        }
+        await load();
       } catch (err) {
         setError(err instanceof Error ? err.message : `Failed to select ${broker}.`);
-        // Refresh the blockers so the panel shows WHY it was refused.
-        if (status) void loadBlockers(status.broker);
+        if (status) void loadBlockers(status.active_broker);
       } finally {
         setSwitching(null);
       }
     },
-    [loadBlockers, status],
+    [load, loadBlockers, status],
   );
 
   if (!status) {
@@ -156,60 +205,20 @@ export function BrokerStatusPanel() {
     );
   }
 
-  const active = status.broker;
-  const session = status.session;
-  const health = status.health;
+  const active = status.active_broker;
 
-  // Zerodha view is the active-broker session when active === zerodha, otherwise a stored
-  // standby summarised from health.
-  const zerodhaActive = active === "zerodha";
-  const dhanActive = active === "dhan";
-
-  const zerodhaState = zerodhaActive
-    ? zerodhaTokenState(session, health)
-    : session.broker === "zerodha"
-      ? zerodhaTokenState(session, health)
-      : "token waiting";
-
-  // Dhan session detail is only in the active session record; when Dhan is standby, derive
-  // the state from configuration + the dhan_* fields on the status.
-  const dhanSession = dhanActive ? session : null;
-  const dhanState = dhanTokenState(
-    dhanSession,
-    dhanActive
-      ? health
-      : {
-          broker: "dhan",
-          authenticated: status.dhan_configured && status.dhan_instruments > 0,
-          token_expires_at: null,
-          token_expired: false,
-          data_ready: false,
-          trading_ready: false,
-          static_ip_configured: status.dhan_static_ip?.ready ?? null,
-          feed_connected: false,
-          feed_age_ms: null,
-          problems: status.dhan_configured ? [] : ["Dhan is not configured"],
-        },
-  );
-
-  // "Ready — standby": a valid non-active token that could take over. Shown per spec when a
-  // valid Dhan token exists while Zerodha is active.
-  const dhanStandbyReady = !dhanActive && dhanState === "ready";
-  const zerodhaStandbyReady = !zerodhaActive && zerodhaState === "ready";
-
-  // The mandated exposure message: shown when Dhan is active AND a switch to Zerodha is
-  // blocked by exposure/unresolved state.
+  // The mandated exposure message: Dhan is active AND a switch to Zerodha is blocked by
+  // exposure or unresolved broker state (as opposed to, say, Zerodha simply having no
+  // token yet, which is a different and non-alarming situation).
   const zerodhaBlockedByDhanExposure =
-    dhanActive &&
-    blockers.zerodha.some((b) =>
-      /exposure|unresolved|flat|reconcil|open|residual/i.test(`${b.reason} ${b.detail}`),
-    );
+    active === "dhan" &&
+    blockers.zerodha.some((b) => /exposure|unresolved|flat|reconcil|open|residual|working|intent/i.test(b));
 
   return (
     <section className="box-broker-panel">
       <h3 className="box-broker-panel-h">
         Brokers
-        <span className="box-dim"> — exactly one active at a time</span>
+        <span className="box-dim"> — exactly one active at a time (generation {status.generation})</span>
       </h3>
 
       {error && <p className="box-broker-panel-msg box-broker-panel-msg--error">{error}</p>}
@@ -221,44 +230,35 @@ export function BrokerStatusPanel() {
       )}
 
       <div className="box-broker-cards">
-        {/* ── Zerodha ── */}
-        <BrokerCard
-          broker="zerodha"
-          active={zerodhaActive}
-          tokenState={zerodhaState}
-          standbyReady={zerodhaStandbyReady}
-          loginOrExpiry={`Login ${session.broker === "zerodha" ? session.login_day ?? "—" : "—"}`}
-          identity={redactIdentity(session.broker === "zerodha" ? session.client_id : null)}
-          feed={feedLabel(status.feed, zerodhaActive)}
-          marginProvenance={zerodhaActive ? status.last_margin_source ?? null : null}
-          selectable={!zerodhaActive}
-          switching={switching === "zerodha"}
-          blockers={blockers.zerodha}
-          onSelect={() => void onSelect("zerodha")}
-        />
-
-        {/* ── Dhan ── */}
-        <BrokerCard
-          broker="dhan"
-          active={dhanActive}
-          tokenState={dhanState}
-          standbyReady={dhanStandbyReady}
-          loginOrExpiry={
-            dhanActive && session.broker === "dhan"
-              ? `Expires ${whenDate(session.token_expires_at)}`
-              : status.dhan_static_ip?.configured_ip
-                ? "Static IP configured"
-                : "Expiry unknown until active"
-          }
-          identity={redactIdentity(dhanActive ? session.client_id : null)}
-          feed={feedLabel(status.feed, dhanActive)}
-          marginProvenance={dhanActive ? status.last_margin_source ?? null : null}
-          selectable={!dhanActive && status.dhan_configured}
-          switching={switching === "dhan"}
-          blockers={blockers.dhan}
-          onSelect={() => void onSelect("dhan")}
-        />
+        {BROKERS.map((broker) => {
+          const entry = status.brokers.find((b) => b.broker === broker);
+          if (!entry) return null;
+          const isActive = broker === active;
+          return (
+            <BrokerCard
+              key={broker}
+              broker={broker}
+              active={isActive}
+              tokenState={tokenStateLabel(entry.session, entry.health, isActive)}
+              expiry={expiryLabel(broker, entry.session)}
+              identity={entry.session.account_label ?? "—"}
+              feed={feedLabel(runtime ?? null, broker, isActive)}
+              dataReady={entry.health.data_ready}
+              tradingReady={entry.health.trading_ready}
+              problems={entry.health.problems}
+              selectable={!isActive}
+              switching={switching === broker}
+              blockers={blockers[broker]}
+              onSelect={() => void onSelect(broker)}
+            />
+          );
+        })}
       </div>
+
+      <p className="box-broker-panel-foot box-dim">
+        Charge and margin provenance are recorded per trade in PostgreSQL and shown on the
+        trade itself. Selecting a broker never arms live trading.
+      </p>
     </section>
   );
 }
@@ -267,11 +267,12 @@ function BrokerCard({
   broker,
   active,
   tokenState,
-  standbyReady,
-  loginOrExpiry,
+  expiry,
   identity,
   feed,
-  marginProvenance,
+  dataReady,
+  tradingReady,
+  problems,
   selectable,
   switching,
   blockers,
@@ -280,98 +281,70 @@ function BrokerCard({
   broker: BrokerId;
   active: boolean;
   tokenState: string;
-  standbyReady: boolean;
-  loginOrExpiry: string;
+  expiry: string;
   identity: string;
   feed: string;
-  marginProvenance: string | null;
+  dataReady: boolean;
+  tradingReady: boolean;
+  problems: string[];
   selectable: boolean;
   switching: boolean;
-  blockers: BrokerSwitchBlocker[];
+  blockers: string[];
   onSelect: () => void;
 }) {
-  const label = broker === "dhan" ? "Dhan" : "Zerodha";
-  const stateClass =
-    tokenState === "ready"
-      ? "is-ready"
-      : tokenState.includes("waiting") || tokenState.includes("unknown")
-        ? "is-wait"
-        : "is-bad";
-
+  const label = broker === "zerodha" ? "Zerodha" : "Dhan";
   return (
-    <div className={`box-broker-card${active ? " box-broker-card--active" : ""}`}>
-      <div className="box-broker-card-head">
-        <span className={`box-broker box-broker--${broker}`}>{label.toUpperCase()}</span>
-        {active ? (
-          <span className="box-broker-active-tag">ACTIVE</span>
-        ) : standbyReady ? (
-          <span className="box-broker-standby-tag">Ready — standby</span>
-        ) : null}
-      </div>
+    <article className={`box-broker-card${active ? " box-broker-card--active" : ""}`}>
+      <header className="box-broker-card-h">
+        <span className="box-broker-card-name">{label}</span>
+        <span className={`box-broker-badge${active ? " box-broker-badge--active" : ""}`}>
+          {active ? "ACTIVE" : "STANDBY"}
+        </span>
+      </header>
 
-      <dl className="box-broker-card-grid">
-        <div>
-          <dt>Token</dt>
-          <dd className={`box-broker-token ${stateClass}`}>{tokenState}</dd>
-        </div>
-        <div>
-          <dt>{broker === "dhan" ? "Expiry / IP" : "Login"}</dt>
-          <dd>{loginOrExpiry}</dd>
-        </div>
-        <div>
-          <dt>Identity</dt>
-          <dd className="mono" title="Redacted — a raw client id or token is never shown">
-            {identity}
-          </dd>
-        </div>
-        <div>
-          <dt>Feed</dt>
-          <dd>{feed}</dd>
-        </div>
-        {active && (
-          <div>
-            <dt>Margin source</dt>
-            <dd title="Which broker priced the most recent margin call">
-              {marginProvenance ?? "—"}
-            </dd>
-          </div>
-        )}
-        <div>
-          <dt>Charges</dt>
-          <dd title="Charge provenance follows the active broker's own fee schedule">
-            {label} schedule
-          </dd>
-        </div>
+      <dl className="box-broker-card-dl">
+        <dt>Token</dt>
+        <dd>{tokenState}</dd>
+        <dt>{broker === "dhan" ? "Expiry" : "Session"}</dt>
+        <dd>{expiry}</dd>
+        <dt>Account</dt>
+        <dd>{identity}</dd>
+        <dt>Feed</dt>
+        <dd>{feed}</dd>
+        <dt>Data</dt>
+        <dd>{dataReady ? "ready" : "not ready"}</dd>
+        <dt>Trading</dt>
+        <dd>{tradingReady ? "permitted" : "blocked"}</dd>
       </dl>
 
-      {selectable && (
-        <button
-          type="button"
-          className="btn btn--sm"
-          disabled={switching || blockers.length > 0}
-          onClick={onSelect}
-          title={
-            blockers.length > 0
-              ? "This switch is currently refused — see the blockers below"
-              : `Make ${label} the active broker`
-          }
-        >
-          {switching ? "Switching…" : `Make ${label} active`}
-        </button>
+      {problems.length > 0 && (
+        <ul className="box-broker-problems">
+          {problems.map((p) => (
+            <li key={p}>{p}</li>
+          ))}
+        </ul>
       )}
 
-      {!active && blockers.length > 0 && (
+      {selectable && (
         <>
-          <p className="box-broker-blockers-h">Switch refused:</p>
-          <ul className="box-broker-blockers">
-            {blockers.map((b) => (
-              <li key={`${b.reason}-${b.detail}`}>
-                <strong>{b.reason}</strong> — {b.detail}
-              </li>
-            ))}
-          </ul>
+          <button
+            type="button"
+            className="box-btn box-btn--secondary"
+            onClick={onSelect}
+            disabled={switching || blockers.length > 0}
+            aria-label={`Make ${label} the active broker`}
+          >
+            {switching ? "Switching…" : `Make ${label} active`}
+          </button>
+          {blockers.length > 0 && (
+            <ul className="box-broker-blockers">
+              {blockers.map((b) => (
+                <li key={b}>{blockerText(b)}</li>
+              ))}
+            </ul>
+          )}
         </>
       )}
-    </div>
+    </article>
   );
 }
