@@ -213,6 +213,54 @@ export interface BoxConfigView {
   };
 }
 
+/**
+ * ORDER-UPDATE STREAM STATUS, as published inside GET /api/box/status.
+ *
+ * Mirrors `order-stream-status.schema.json` (contract v1.3.0) and
+ * `src/box/orderStreamStatus.ts` in the backend. Its whole purpose is to keep two questions
+ * apart that a dashboard naturally conflates:
+ *
+ *   "are ticks arriving?"        → market-data health
+ *   "will I see a fill quickly?" → THIS
+ *
+ * `fills_observed_by` is the field a human should read. `rest_polling_only` means
+ * fill-observation latency is bounded by the polling cadence and the broker pacing floor, not
+ * by broker push latency — so no promptness should be assumed.
+ *
+ * `wiring` distinguishes four genuinely different situations, and `not_wired` is NOT the same
+ * as "disabled by choice": it means the implementation exists and is tested but nothing is
+ * consuming it, so it cannot deliver a fill however healthy the socket looks.
+ *
+ * NO SECRET APPEARS HERE. `gate_env_var` is a variable NAME only, never a value.
+ */
+export interface OrderStreamHealthSnapshot {
+  state: "DISABLED" | "DOWN" | "CONNECTING" | "LIVE" | "RECONNECTED_PENDING_RECONCILE";
+  connected: boolean;
+  authorised: boolean;
+  lastEventAt: number | null;
+  disconnects: number;
+  reconcilePending: boolean;
+  detail: string;
+}
+
+export interface OrderStreamBrokerStatus {
+  broker: BrokerId;
+  wiring: "not_built" | "not_wired" | "gated_off" | "armed";
+  /** Variable NAME only — never a value. */
+  gate_env_var: string;
+  gate_enabled: boolean;
+  health: OrderStreamHealthSnapshot | null;
+  fills_observed_by: "rest_polling_only" | "stream_primary_rest_reconcile";
+  detail: string;
+}
+
+export interface OrderStreamStatus {
+  any_stream_live: boolean;
+  /** Always true. The payload itself tells the UI not to conflate the two health signals. */
+  market_data_health_is_not_order_stream_health: true;
+  brokers: OrderStreamBrokerStatus[];
+}
+
 export interface BoxStatus {
   running: boolean;
   state: "SCANNING" | "MARKET_CLOSED" | "STOPPED";
@@ -226,6 +274,19 @@ export interface BoxStatus {
   broker?: BrokerId;
   brokers_with_open_positions?: BrokerId[];
   authenticated: boolean;
+  /**
+   * ORDER-UPDATE STREAM STATUS — deliberately REQUIRED, not optional.
+   *
+   * Contract v1.3.0 pins this as a required property of box-status, and the backend always
+   * emits it. Declaring it optional here would reproduce exactly the failure this file already
+   * warns about further down: a shape that typechecks and passes tests while the panel stays
+   * silently dark in production. A missing field must be a TYPE ERROR.
+   *
+   * This is NOT market-data health. A healthy tick feed is no evidence that fills are observed
+   * promptly — Zerodha delivers order updates as text frames on the same socket that carries
+   * binary ticks, and Dhan uses a separate order-update WebSocket.
+   */
+  order_stream: OrderStreamStatus;
   db_enabled: boolean;
   started_at: number | null;
   stopped_at: number | null;

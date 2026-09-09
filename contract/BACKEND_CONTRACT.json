@@ -1,6 +1,6 @@
 {
   "backend_repo": "Prakash2571/Strikedge_B",
-  "backend_sha": "c976fa2532dc35e04d4bbb8123f2d78f662407a4",
-  "contract_version": "1.2.0",
-  "schemas_sha256": "906901d9edab72b22f06d3f379be8c921e8dfde53d7ac9add2ca9b7488c3d737"
+  "backend_sha": "14f85f1ac5c7a9fd93a249bafd2e0e839cd27405",
+  "contract_version": "1.3.0",
+  "schemas_sha256": "ff81fb95af7e39ec8cd4db66194e255f9e5af398b25e406aa08946cf4e95c8dd"
 }

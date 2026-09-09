@@ -38,6 +38,7 @@ import { DirectionBadge } from "./BoxDirection.tsx";
 import { BrokerBadge, BrokerHistoryFilter, type BrokerFilter } from "./BoxBroker.tsx";
 import BoxDeleteModal from "./BoxDeleteModal.tsx";
 import { BoxExecutionHealth } from "./BoxExecutionHealth.tsx";
+import { BoxOrderStreamStatus } from "./BoxOrderStreamStatus.tsx";
 import { BoxExecutionAttempts } from "./BoxExecutionAttempts.tsx";
 import { BoxDayPnlStrip } from "./BoxDayPnl.tsx";
 import { BoxGates } from "./BoxGates.tsx";
@@ -1093,6 +1094,10 @@ export default function Box({ onLock }: Props) {
         metrics={status?.metrics}
         mode={status?.execution_mode ?? "paper_latency"}
       />
+
+      {/* Directly below execution health, because "how fast do fills complete" is meaningless
+          without knowing HOW a fill is even observed. Separate panel, separate signal. */}
+      <BoxOrderStreamStatus orderStream={status?.order_stream} />
 
       <nav className="box-views" role="tablist" aria-label="Box view">
         <button
