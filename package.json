@@ -6,6 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "contract:verify": "node contract/verify.mjs",
+    "contract:types": "node contract/generate-types.mjs",
+    "contract:types:check": "node contract/generate-types.mjs && git diff --exit-code -- src/api/contract.generated.ts",
     "test": "node --experimental-strip-types --test \"tests/*.test.mjs\"",
     "preview": "vite preview"
   },
@@ -19,8 +22,8 @@
   "devDependencies": {
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
-    "@vitejs/plugin-react": "^4.3.4",
-    "typescript": "^5.6.3",
-    "vite": "^5.4.11"
+    "@vitejs/plugin-react": "4.7.0",
+    "typescript": "5.6.3",
+    "vite": "6.4.3"
   }
 }
