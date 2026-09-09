@@ -68,8 +68,46 @@ jobs:
       - name: Lockfile must be complete and in sync
         run: git diff --exit-code -- package-lock.json
 
+      # Audit the COMPLETE installed tree — production AND dev dependencies (that is npm's default;
+      # we deliberately do NOT pass --omit=dev, because the build toolchain, Vite and esbuild, ships
+      # only as devDependencies and a high/critical advisory there still matters to anyone who runs
+      # the dev server or the build. `--audit-level=high` fails the pipeline on a high or critical
+      # advisory while tolerating a merely low/moderate dev-only one, so a floating transitive bump
+      # cannot silently reintroduce a serious advisory (e.g. the Vite/esbuild ones cleared here).
+      - name: Audit dependencies (high/critical fails the build)
+        run: npm audit --audit-level=high
+
+      # ── Backend⇄frontend API contract gate ──────────────────────────────────────────────
+      #
+      # The frontend VENDORS the backend-owned contract under contract/ and PINS it by commit
+      # SHA + digest in contract/BACKEND_CONTRACT.json. A normal build therefore NEVER depends on
+      # an unpinned, mutable download of the backend's main — it reads the vendored, digest-verified
+      # copy. These two steps make a stale, tampered or drifted contract FAIL CI:
+      #
+      #   1. `contract:verify` recomputes the sha256 over the vendored contract/schemas/** with the
+      #      vendored digest.mjs and asserts it equals schemas_sha256 in BOTH version.json AND
+      #      BACKEND_CONTRACT.json, and that all three pinned files exist. A missing/stale/tampered
+      #      vendored contract fails here.
+      #   2. The committed generated types (src/api/contract.generated.ts) must be up to date with
+      #      the vendored schemas: we regenerate and `git diff --exit-code` — any difference is a
+      #      failure (a hand-edit, or a schema change nobody regenerated for).
+      #
+      # The static type↔contract assertions themselves (src/api/contract.assert.ts) are enforced by
+      # `tsc -b` in the Build step below, so a backend shape change the frontend has not adopted
+      # fails the typecheck.
+      - name: Verify vendored contract (pinned digest + presence)
+        run: npm run contract:verify
+
+      - name: Generated contract types must be up to date
+        run: |
+          set -euo pipefail
+          npm run contract:types
+          git diff --exit-code -- src/api/contract.generated.ts \
+            || { echo "src/api/contract.generated.ts is stale — run 'npm run contract:types' and commit."; exit 1; }
+
       # `npm run build` is `tsc -b && vite build`, so this one step both typechecks the app (strict,
-      # incl. noUnusedLocals / noUnusedParameters) and produces the bundle in dist/.
+      # incl. noUnusedLocals / noUnusedParameters, AND the contract type-assertions in
+      # src/api/contract.assert.ts) and produces the bundle in dist/.
       - name: Build
         run: npm run build
 
@@ -220,3 +258,48 @@ jobs:
           if (failed) process.exit(1);
           console.log("OK: no session/token key is stored in localStorage.");
           NODE
+
+      # ── No hardcoded API origin / broker URL in the bundle ──────────────────────────────
+      #
+      # Production serves the SPA and the API on the SAME ORIGIN behind nginx, so the shipped
+      # bundle must make RELATIVE "/api/..." requests and carry NO hardcoded origin. Two failure
+      # modes this catches:
+      #   1. The old localhost footgun: an absent VITE_API_BASE_URL used to fall back to
+      #      "http://localhost:3001", so every visitor's browser called ITS OWN localhost and the
+      #      literal "localhost:3001" / "127.0.0.1:3001" shipped in the public bundle. The frontend
+      #      now defaults to same-origin, so neither string may ever appear in dist/.
+      #   2. A broker or token-provider origin baked into the client. The browser must reach the
+      #      broker only THROUGH the backend; a direct broker/token-provider URL in the bundle would
+      #      be a misconfiguration (and a data-exfiltration surface), so those origins are banned too.
+      #
+      # Fixed strings (grep -F), scanned across the whole shipped tree.
+      - name: Scan built bundle for hardcoded API/broker origins
+        run: |
+          set -euo pipefail
+          patterns=(
+            localhost:3001
+            127.0.0.1:3001
+            kite.zerodha.com
+            api.kite.trade
+            api.dhan.co
+            dhan.co
+            calspread.online
+          )
+          hits=0
+          for p in "${patterns[@]}"; do
+            if match="$(grep -rInF -- "$p" dist/ || true)"; then
+              if [ -n "$match" ]; then
+                echo "FAIL: forbidden origin '${p}' found in the built bundle:"
+                echo "$match" | head -n 5
+                hits=$((hits + 1))
+              fi
+            fi
+          done
+          if [ "$hits" -ne 0 ]; then
+            echo ""
+            echo "${hits} hardcoded origin(s) leaked into dist/. Production is same-origin behind"
+            echo "nginx: the bundle must make relative /api requests and embed no localhost, dev"
+            echo "backend or broker/token-provider URL. Leave VITE_API_BASE_URL unset for same-origin."
+            exit 1
+          fi
+          echo "OK: no hardcoded API/broker origin in the built bundle."

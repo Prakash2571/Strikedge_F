@@ -70,7 +70,7 @@ identical. Branding/title changed to **StrikeEdge**.
 
 | File                            | Purpose                                                                       |
 | ------------------------------- | ----------------------------------------------------------------------------- |
-| `src/api/http.ts`               | The one fetch wrapper: `credentials: "include"`, JSON errors, a CSRF header on every mutating request, and a single 401 handler that notifies subscribers. Replaces the token-in-localStorage transport of the source. |
+| `src/api/http.ts`               | The one fetch wrapper: `credentials: "include"`, JSON errors, an **in-memory CSRF token** (`setCsrfToken`/`getCsrfToken`/`clearCsrfToken`) echoed as `x-csrf-token` on every mutating request, and a single 401 handler that notifies subscribers and clears the token. The CSRF token is delivered in the body of `/api/access/verify` and an authenticated `/api/access/status`, never read from a cookie and never persisted. Replaces the token-in-localStorage transport of the source. |
 | `src/api/access.ts`             | `verifyPasscode()`, `accessStatus()`, `logout()`.                             |
 | `src/api/box.ts`                | Every `/api/box/*` call the Box UI makes, plus `GET /api/runtime/status`, `GET /api/export/status`, `GET /api/broker/status`, `GET /api/broker/switch-blockers`, `POST /api/broker/select`. |
 | `src/api/types.ts`              | The Box + broker response types, lifted from the source `api.ts`. IDs documented as OPAQUE STRINGS. Adds `RuntimeStatus` / `ExportStatus`. |
