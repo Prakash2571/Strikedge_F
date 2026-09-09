@@ -1,8 +1,40 @@
-# API contract fixtures
+# API contract fixtures — SAMPLE PAYLOADS, **NOT** the authority
+
+> **These fixtures are NO LONGER the authoritative API contract.** The authority is now the
+> backend-owned, versioned JSON-Schema in **`contract/schemas/**`**, vendored and pinned by
+> `contract/BACKEND_CONTRACT.json`, digest-verified by `npm run contract:verify`, and validated
+> against the backend's REAL serialized responses in the backend's own contract suite. The files
+> here are retained **only as realistic sample payloads** — captured from a running backend — to
+> exercise the vendored validator over real bytes (`tests/contractSchemas.test.mjs`) and to power
+> the negative-control tests. Treat a fixture as an example, never as the source of truth: if a
+> fixture and a schema disagree, the **schema wins**, and the fixture should be re-captured.
+
+## Fixture ↔ schema divergences
+
+There are **no** outstanding fixture ↔ schema divergences. `tests/contractSchemas.test.mjs`
+validates every retained fixture CLEANLY against its authoritative schema with **no whitelist**.
+
+Former divergences RESOLVED by backend contract **v1.1.0** and **v1.2.0**, which pin fields that
+were always on the wire but previously undeclared or only optionally declared:
+
+| Fixture | Field(s) — now pinned by the schema | Contract |
+| --- | --- | --- |
+| `export-status.json` | `enabled`, `connected` | v1.1.0 |
+| `broker-status.json` | `brokers[].session.state` | v1.1.0 |
+| `broker-status.json` | `brokers[].session.account_label`, `established_at`, `expires_at` — now **required** (nullable `["string","null"]`) instead of optional; the fixture already carries all three (as `null`), matching the real `projectBrokerSession`. | v1.2.0 |
+
+Contract **v1.2.0** also added `contract/protocol.json` (the single source of truth for the CSRF
+header name, the default session cookie name and the CSRF cookie suffix). It is not a response
+fixture, so it does not appear above; it is covered by the digest and exercised by
+`tests/csrfHeaderContract.test.mjs`.
+
+---
+
+## What these files are (historical context)
 
 These JSON files were **captured from a running StrikeEdge backend**, not hand-written.
-`tests/apiContract.test.mjs` asserts the frontend's expectations against them, so a field
-rename on either side fails the build instead of silently blanking the dashboard.
+`tests/apiContract.test.mjs` additionally asserts the specific fields the UI reads against them
+as a complementary, human-readable check — but the schema, not the fixture, is the contract.
 
 ## Why they exist
 

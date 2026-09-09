@@ -25,14 +25,23 @@
  * nothing about the contract.
  *
  * HOW THIS TEST WORKS
- * The JSON in `tests/fixtures/` was CAPTURED FROM A RUNNING StrikeEdge BACKEND (see
- * tests/fixtures/README.md), not hand-written. These assertions check the frontend's
- * expectations against those recordings, so a rename on either side fails here instead of
- * silently blanking the dashboard.
+ * The AUTHORITY for response shapes is now the backend-owned, vendored JSON-Schema contract in
+ * `contract/schemas/**` (pinned by `contract/BACKEND_CONTRACT.json`, digest-verified by
+ * `npm run contract:verify`, and validated against these fixtures in
+ * `tests/contractSchemas.test.mjs`). The JSON in `tests/fixtures/` is NO LONGER the contract —
+ * it is a set of realistic sample payloads CAPTURED FROM A RUNNING StrikeEdge BACKEND (see
+ * tests/fixtures/README.md).
  *
- * WHAT IT CANNOT DO: it is a recording, so it goes stale if the backend changes and nobody
- * re-captures. That is a real limitation and is why the fixture README documents the
- * capture command. It is still far stronger than the nothing that preceded it.
+ * The assertions BELOW are retained as a COMPLEMENTARY, human-readable check of the specific
+ * fields the UI reads (the banners, the broker panel, the safety defaults) — they document
+ * intent at the call site in a way a schema does not. They do not replace the schema authority;
+ * they sit alongside it. The static type↔contract gate lives in `src/api/contract.assert.ts`
+ * (checked by `tsc -b`), and the digest/pin gate in `contract/verify.mjs`.
+ *
+ * WHAT IT CANNOT DO: a fixture is a recording, so it goes stale if the backend changes and
+ * nobody re-captures. That is precisely why the SCHEMAS (not these fixtures) are the authority
+ * now — a schema is validated against the backend's REAL serialized responses in the backend's
+ * own contract suite, so it cannot quietly lie about the API.
  */
 
 import assert from "node:assert/strict";
