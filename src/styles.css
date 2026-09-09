@@ -1798,6 +1798,34 @@ body {
 .box-exec-stat.is-bad .box-exec-stat-v {
   color: var(--neg, #dc2626);
 }
+
+/* ---- order-update stream panel ----------------------------------------------
+   A warning tone for `not_wired`: the capability exists in the code but delivers
+   no fill, which must not read as a neutral "off". */
+.box-exec-stat.is-warn .box-exec-stat-v {
+  color: var(--warn, #d97706);
+}
+.box-exec-stat-sub {
+  font-size: 0.63rem;
+  color: var(--text-3);
+  margin-top: 0.15rem;
+  line-height: 1.35;
+}
+.box-exec-note {
+  font-size: 0.7rem;
+  color: var(--text-3);
+  margin: 0.2rem 0 0.6rem;
+  line-height: 1.45;
+}
+.box-exec-note.is-warn {
+  color: var(--warn, #d97706);
+}
+.box-exec-mode.is-good {
+  color: var(--pos, #16a34a);
+}
+.box-exec-mode.is-warn {
+  color: var(--warn, #d97706);
+}
 .box-neg {
   color: var(--neg, #dc2626);
 }
