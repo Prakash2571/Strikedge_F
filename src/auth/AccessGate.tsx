@@ -20,7 +20,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { accessStatus, logout, verifyPasscode } from "../api/access.ts";
-import { onUnauthorized } from "../api/http.ts";
+import { clearCsrfToken, onUnauthorized } from "../api/http.ts";
 import BrandMark from "../BrandMark.tsx";
 import ThemeToggle from "../ThemeToggle.tsx";
 
@@ -56,9 +56,12 @@ export default function AccessGate({ children }: AccessGateProps) {
   }, []);
 
   // A 401 ANYWHERE clears authenticated state and returns to the gate. The dashboard's own
-  // subscriber closes the SSE; this one flips the UI back to locked.
+  // subscriber closes the SSE; this one flips the UI back to locked. `notifyUnauthorized`
+  // already dropped the in-memory CSRF token; clearing again here is a cheap belt-and-braces
+  // so a reset gate never holds a stale token.
   useEffect(() => {
     return onUnauthorized(() => {
+      clearCsrfToken();
       setState("locked");
       setPasscode("");
     });

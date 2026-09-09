@@ -18,6 +18,9 @@ import {
   onUnauthorized,
   notifyUnauthorized,
   UnauthorizedError,
+  setCsrfToken,
+  getCsrfToken,
+  clearCsrfToken,
 } from "../src/api/http.ts";
 
 /** Install a fake global fetch that returns a chosen response, capturing the call. */
@@ -59,12 +62,14 @@ test("a 401 notifies every unauthorized subscriber exactly once", async () => {
 
 test("a 401 rejects the caller with an UnauthorizedError", async () => {
   stubFetch(() => jsonResponse(401, { error: "nope" }));
+  setCsrfToken("tok-live"); // a mutation needs a token to reach the network
   const off = onUnauthorized(() => {});
   await assert.rejects(
     () => request("/api/box/trades/abc/close", "Failed to close", { method: "POST" }),
     (err) => err instanceof UnauthorizedError,
   );
   off();
+  clearCsrfToken();
 });
 
 test("unsubscribing stops a listener from firing on a later 401", async () => {
@@ -86,12 +91,14 @@ test("notifyUnauthorized can be fired directly (shared by the SSE path)", () => 
 
 test("a mutating request sends credentials:include and JSON content-type", async () => {
   const calls = stubFetch(() => jsonResponse(200, { ok: true }));
+  setCsrfToken("tok-live");
   await request("/api/box/start", "Failed", { method: "POST", body: { a: 1 } });
   const { init } = calls[0];
   assert.equal(init.credentials, "include", "cookie credentials always sent");
   assert.equal(init.method, "POST");
   assert.equal(init.headers["Content-Type"], "application/json");
   assert.equal(init.body, JSON.stringify({ a: 1 }));
+  clearCsrfToken();
 });
 
 test("a GET does not carry a CSRF header (only mutating requests do)", async () => {
@@ -118,6 +125,7 @@ test("a non-JSON error body still surfaces the HTTP status, not a parse error", 
 
 test("a JSON error body's message is preferred", async () => {
   stubFetch(() => jsonResponse(409, { error: "Dhan still owns exposure" }));
+  setCsrfToken("tok-live");
   await assert.rejects(
     () => request("/api/broker/select", "Failed to select", { method: "POST", body: {} }),
     (err) => {
@@ -125,4 +133,5 @@ test("a JSON error body's message is preferred", async () => {
       return true;
     },
   );
+  clearCsrfToken();
 });

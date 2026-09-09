@@ -2,9 +2,10 @@
  * Every backend call the StrikeEdge Box UI makes.
  *
  * All of these go through the single `request` wrapper in `http.ts`, so they share one
- * behaviour: same-origin cookie credentials, a CSRF header on mutating calls, honest JSON
- * error messages, and a single 401 handler. There is no token to pass — the session is the
- * HttpOnly cookie.
+ * behaviour: same-origin cookie credentials, an in-memory CSRF token echoed as the
+ * `x-csrf-token` header on mutating calls, honest JSON error messages, and a single 401
+ * handler. There is no SESSION token to pass — the session is the HttpOnly cookie; the CSRF
+ * token lives only in the transport's process memory.
  */
 
 import { apiUrl, request } from "./http.ts";
