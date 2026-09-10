@@ -1826,6 +1826,60 @@ body {
 .box-exec-mode.is-warn {
   color: var(--warn, #d97706);
 }
+
+/* ---- operational state panel (item 10) --------------------------------------
+   Two INDEPENDENT health signals rendered side by side but never conflated, plus
+   an entry-gate banner whose "paused-but-safe" band is visually distinct from a
+   "broken" band. Signalling is never colour-alone — each band also carries a text
+   glyph and a word. */
+.box-op-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 0.5rem 1.25rem;
+}
+.box-op-signal {
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 8px;
+  padding: 0.5rem 0.75rem;
+  background: var(--surface-0, transparent);
+}
+.box-op-gate {
+  margin: 0.35rem 0 0.7rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 8px;
+  border: 1px solid var(--border, #e5e7eb);
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+.box-op-gate--ok {
+  color: var(--pos, #16a34a);
+  border-color: color-mix(in srgb, var(--pos, #16a34a) 40%, transparent);
+  background: color-mix(in srgb, var(--pos, #16a34a) 8%, transparent);
+}
+/* PAUSED-but-safe: warn tone, deliberately NOT the error red of "broken". */
+.box-op-gate--paused {
+  color: var(--warn, #d97706);
+  border-color: color-mix(in srgb, var(--warn, #d97706) 45%, transparent);
+  background: color-mix(in srgb, var(--warn, #d97706) 8%, transparent);
+}
+/* BROKEN: error tone, visually distinct from the paused band above. */
+.box-op-gate--broken {
+  color: var(--neg, #dc2626);
+  border-color: color-mix(in srgb, var(--neg, #dc2626) 45%, transparent);
+  background: color-mix(in srgb, var(--neg, #dc2626) 8%, transparent);
+}
+.box-op-gate-head {
+  margin: 0 0 0.25rem;
+}
+.box-op-reasons {
+  margin: 0.15rem 0 0.35rem;
+  padding-left: 1.1rem;
+  font-size: 0.75rem;
+  color: var(--text-2, inherit);
+}
+.box-op-reasons li {
+  margin: 0.1rem 0;
+}
 .box-neg {
   color: var(--neg, #dc2626);
 }
