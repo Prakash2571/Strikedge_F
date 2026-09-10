@@ -39,6 +39,61 @@
       }
     ]
   },
+  "execution_funnel": {
+    "candidates_evaluated": 0,
+    "qualified_opportunities": 0,
+    "attempts_admitted": 0,
+    "attempts_submitted": 0,
+    "four_leg_completed_entries": 0,
+    "zero_post_refusals": 0,
+    "zero_post_by_reason": {
+      "coherence": 0,
+      "capital": 0,
+      "entry_guard": 0,
+      "hedge_coverage": 0,
+      "deadline": 0,
+      "depth": 0,
+      "ownership": 0,
+      "other": 0
+    },
+    "submitted_failures": 0,
+    "submitted_failures_by_reason": {
+      "no_fill": 0,
+      "partial_entry_unwound": 0,
+      "partial_entry_residual": 0,
+      "economics_abort_after_fill": 0,
+      "quarantined_unknown": 0
+    },
+    "no_fill_cancellations": 0,
+    "partial_entry_recoveries": 0,
+    "unresolved_exposure_open": 0,
+    "unresolved_exposure_total": 0,
+    "completed_exits": 0,
+    "realised_net_pnl": 0,
+    "recovery_costs_included": 0,
+    "economically_profitable": 0,
+    "economically_unprofitable": 0,
+    "ratios": {
+      "admission_rate": { "numerator": 0, "denominator": 0, "rate": null, "basis": "admitted attempts / qualified opportunities" },
+      "submission_rate": { "numerator": 0, "denominator": 0, "rate": null, "basis": "attempts with >=1 real broker POST / admitted attempts" },
+      "execution_completion_rate": { "numerator": 0, "denominator": 0, "rate": null, "basis": "four-leg completed entries / attempts with >=1 real broker POST (excludes zero-POST local refusals; includes every broker-facing attempt)" },
+      "economic_success_rate": { "numerator": 0, "denominator": 0, "rate": null, "basis": "economically profitable outcomes / four-leg completed entries (economic success is NOT execution completion)" },
+      "unresolved_exposure_rate": { "numerator": 0, "denominator": 0, "rate": null, "basis": "attempts that ended with unresolved exposure / admitted attempts" }
+    }
+  },
+  "economic_admission": null,
+  "market_data_state": "DISABLED",
+  "market_data_health": {
+    "state": "DISABLED",
+    "generation": 0,
+    "desired": 0,
+    "confirmed": 0,
+    "readyInstruments": 0,
+    "lastHeartbeatAt": null,
+    "lastFrameAt": null,
+    "lastDepthAt": null,
+    "backlog": false
+  },
   "database_healthy": true,
   "daily_risk_seed_healthy": null,
   "reconciliation_complete": true,
