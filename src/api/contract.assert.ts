@@ -150,6 +150,9 @@ type _BrokerStatus = Assert<MutuallyAssignable<BrokerStatus, BrokerStatusContrac
  */
 
 // GET /api/box/status — headline lifecycle/health scalars the dashboard switches on.
+// `market_data_state` is a CLOSED enum in the schema (the 8-state MarketData machine), so it is
+// asserted here; `market_data_health`/`execution_funnel`/`economic_admission` are OPEN leaves
+// (schema pins presence + object-ness only), so a whole-object assertion on them would be false.
 type _BoxStatusFields = Assert<
   MutuallyAssignable<
     Pick<
@@ -158,7 +161,7 @@ type _BoxStatusFields = Assert<
       | "feed_healthy" | "quotes" | "quote_updates" | "underlyings" | "candidates"
       | "monitored_tokens" | "hub_subscribed" | "strike_level" | "open_positions" | "started_at"
       | "stopped_at" | "universe_built_at" | "subscribed_option_tokens" | "subscribed_spot_tokens"
-      | "feed_age_ms" | "skipped_for_budget" | "skipped_symbols" | "last_error"
+      | "feed_age_ms" | "skipped_for_budget" | "skipped_symbols" | "last_error" | "market_data_state"
     >,
     Pick<
       BoxStatus,
@@ -166,7 +169,7 @@ type _BoxStatusFields = Assert<
       | "feed_healthy" | "quotes" | "quote_updates" | "underlyings" | "candidates"
       | "monitored_tokens" | "hub_subscribed" | "strike_level" | "open_positions" | "started_at"
       | "stopped_at" | "universe_built_at" | "subscribed_option_tokens" | "subscribed_spot_tokens"
-      | "feed_age_ms" | "skipped_for_budget" | "skipped_symbols" | "last_error"
+      | "feed_age_ms" | "skipped_for_budget" | "skipped_symbols" | "last_error" | "market_data_state"
     >
   >
 >;

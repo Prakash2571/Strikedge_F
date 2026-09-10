@@ -261,6 +261,184 @@ export interface OrderStreamStatus {
   brokers: OrderStreamBrokerStatus[];
 }
 
+/**
+ * MARKET-DATA TRANSPORT STATE, distinct from BOTH order-stream health AND the crude
+ * `market_data_healthy` boolean.
+ *
+ * Mirrors `MarketDataState` in the backend `src/box/streamHealthPolicy.ts`, pinned in
+ * `box-status.schema.json` (contract v1.5.0). `READY` is the ONLY state that asserts usable
+ * data, and it is deliberately expensive to reach: connected AND authenticated AND
+ * subscriptions confirmed AND fresh usable depth observed for the traded instruments IN THE
+ * CURRENT connection generation. A socket that has merely opened is NOT `READY`.
+ *
+ * The reconnect-and-recover states (`CONNECTING`/`AUTHENTICATING`/`SYNCHRONIZING`) and
+ * `DEGRADED` are the "paused entry, positions still manageable" band; `DISCONNECTED` /
+ * `AUTH_EXPIRED` are the broken band. The UI must render these two bands visibly differently.
+ */
+export type MarketDataState =
+  | "DISABLED"
+  | "CONNECTING"
+  | "AUTHENTICATING"
+  | "SYNCHRONIZING"
+  | "READY"
+  | "DEGRADED"
+  | "DISCONNECTED"
+  | "AUTH_EXPIRED";
+
+/**
+ * MARKET-DATA STATE-MACHINE DIAGNOSTICS — the four DISTINCT time facts kept apart.
+ *
+ * Mirrors `MarketDataStateMachine.diagnostics()` in the backend. The schema pins this leaf as an
+ * OPEN object (presence + object-ness), so this hand-written shape is a deliberate SUPERSET the
+ * dashboard reads — it is NOT asserted whole-object against the generated `Record<string, never>`.
+ *
+ * `generation` advances on every (re)authentication; a book observed under a superseded socket is
+ * not evidence for the new one. `readyInstruments` of `desired` is the per-instrument readiness
+ * gauge — "the feed is up" says nothing about whether the four specific legs a box needs each have
+ * a fresh usable book. `lastHeartbeatAt` (1-byte keep-alive), `lastFrameAt` (any inbound frame)
+ * and `lastDepthAt` (a usable two-sided book) are three separate clocks, never substituted for one
+ * another; `backlog` is the application-ingestion overload signal.
+ */
+export interface MarketDataHealth {
+  state: MarketDataState;
+  generation: number;
+  desired: number;
+  confirmed: number;
+  readyInstruments: number;
+  lastHeartbeatAt: number | null;
+  lastFrameAt: number | null;
+  lastDepthAt: number | null;
+  backlog: boolean;
+}
+
+/** One denominator-carrying funnel ratio. `rate` is null (never 0) when the denominator is 0. */
+export interface FunnelRatio {
+  numerator: number;
+  denominator: number;
+  rate: number | null;
+  /** Plain-language statement of the denominator, carried verbatim from the backend. */
+  basis: string;
+}
+
+/**
+ * THE EXECUTION FUNNEL — outcome counts with EXPLICIT denominators.
+ *
+ * Mirrors `ExecutionFunnel.snapshot()` in the backend `src/box/executionFunnel.ts`. The schema
+ * pins this leaf as an OPEN object, so this shape is a deliberate SUPERSET the dashboard reads.
+ *
+ * The chain is strictly nested (each a subset of the one above): candidates_evaluated ⊇
+ * qualified_opportunities ⊇ attempts_admitted ⊇ attempts_submitted ⊇ four_leg_completed_entries.
+ * EXECUTION completion (did four legs get built) and ECONOMIC outcome (did we make money after
+ * ALL costs including recovery) are independent and BOTH published — neither hides the other.
+ * Zero-POST refusals, submitted failures, unresolved exposure and recovery costs are all carried
+ * so a displayed success rate can never be inflated by hiding them.
+ */
+export interface ExecutionFunnelSnapshot {
+  candidates_evaluated: number;
+  qualified_opportunities: number;
+  attempts_admitted: number;
+  attempts_submitted: number;
+  four_leg_completed_entries: number;
+  zero_post_refusals: number;
+  zero_post_by_reason: Record<string, number>;
+  submitted_failures: number;
+  submitted_failures_by_reason: Record<string, number>;
+  no_fill_cancellations: number;
+  partial_entry_recoveries: number;
+  /** Exposure outstanding RIGHT NOW — a live gauge, not a cumulative count. */
+  unresolved_exposure_open: number;
+  /** Every attempt that ever ended holding unresolved exposure (cumulative). */
+  unresolved_exposure_total: number;
+  completed_exits: number;
+  /** Realised net P&L (₹) after ALL costs, including recovery/unwind. */
+  realised_net_pnl: number;
+  /** Recovery/unwind charges (₹) INSIDE the figure above, shown so they cannot be hidden. */
+  recovery_costs_included: number;
+  economically_profitable: number;
+  economically_unprofitable: number;
+  ratios: {
+    admission_rate: FunnelRatio;
+    submission_rate: FunnelRatio;
+    execution_completion_rate: FunnelRatio;
+    economic_success_rate: FunnelRatio;
+    unresolved_exposure_rate: FunnelRatio;
+  };
+}
+
+/** Provenance of an economic figure — whether a number is broker-confirmed, estimated, stale or absent. */
+export type EconomicProvenance =
+  | "broker_confirmed"
+  | "estimate"
+  | "stale"
+  | "unavailable";
+
+/**
+ * ONE of the five economic quantities, with provenance and freshness.
+ *
+ * `value_rupees` is a rupee amount (₹), never conflated across quantities. `usable` is true ONLY
+ * when the provenance is broker-confirmed AND within the freshness bound; a stale or estimated
+ * figure is shown but must not be read as authority. `note` states exactly what the figure can
+ * and cannot prove — carried verbatim.
+ */
+export interface EconomicFigure {
+  value_rupees: number | null;
+  provenance: EconomicProvenance;
+  observed_at: number | null;
+  age_ms: number | null;
+  usable: boolean;
+  note: string;
+}
+
+/**
+ * THE ECONOMIC PICTURE — five DISTINCT quantities, never collapsed into one "capital" number.
+ *
+ * GROSS NOTIONAL (#4) and PLANNED MARGIN (#2) are different quantities and must never be conflated
+ * or silently relabelled: gross notional is the total option-order value; planned margin is the
+ * broker's netted requirement (much smaller for a hedged box). Peak legging exposure (#3) and
+ * worst-case entry cost (#5) are separate again. Each is labelled by its own field.
+ */
+export interface EconomicPicture {
+  /** #1 Available broker funds. */
+  available_funds: EconomicFigure;
+  /** #2 Margin required by the planned execution sequence (broker basket estimate). */
+  planned_margin: EconomicFigure;
+  /** #3 Peak temporary exposure during the legging window. */
+  peak_legging_exposure: EconomicFigure;
+  /** #4 Gross order notional — the total option-order value, NOT the margin. */
+  gross_notional: EconomicFigure;
+  /** #5 Bounded worst-case entry cost. */
+  worst_case_entry: EconomicFigure;
+  /** The underlying gross-notional metric object (engine-owned; presence only). */
+  gross_notional_metrics?: Record<string, unknown>;
+}
+
+/** Why an economic admission was refused. Distinct, non-conflated reasons. */
+export type EconomicRefusalReason =
+  | "gross_notional_over_cap"
+  | "insufficient_available_funds"
+  | "margin_evidence_stale_or_missing"
+  | "metric_incomplete";
+
+/**
+ * THE ECONOMIC-ADMISSION DECISION — the last decision the economic gate made, or null when no
+ * economic control is enabled.
+ *
+ * Mirrors `EconomicAdmissionReport` in the backend `src/box/boxCapital.ts`. `controls` says which
+ * controls were ENABLED (a control with no config is skipped — reporting it as "passed" would be a
+ * lie). `reasons` lists EVERY failing control at once so an operator sees them all.
+ */
+export interface EconomicAdmission {
+  allowed: boolean;
+  reasons: EconomicRefusalReason[];
+  detail: string | null;
+  picture: EconomicPicture;
+  controls: {
+    gross_cap_enabled: boolean;
+    funds_check_enabled: boolean;
+    margin_evidence_required: boolean;
+  };
+}
+
 export interface BoxStatus {
   running: boolean;
   state: "SCANNING" | "MARKET_CLOSED" | "STOPPED";
@@ -287,6 +465,19 @@ export interface BoxStatus {
    * binary ticks, and Dhan uses a separate order-update WebSocket.
    */
   order_stream: OrderStreamStatus;
+  /**
+   * MARKET-DATA transport state — REQUIRED (contract v1.5.0). This is the DRIVEN state machine
+   * that gates NEW ENTRY on `READY`, distinct from both `order_stream` (fills) and the crude
+   * `market_data_healthy`/`feed_healthy` booleans. Honesty rule #1: a live quote socket is not
+   * evidence that fills are observed — the two are rendered separately.
+   */
+  market_data_state: MarketDataState;
+  /** Market-data state-machine diagnostics: generation, per-instrument readiness, the four time facts, backlog. */
+  market_data_health: MarketDataHealth;
+  /** The execution funnel — outcome counts with explicit denominators (execution vs economic, separately). */
+  execution_funnel: ExecutionFunnelSnapshot;
+  /** The last economic-admission decision (five distinct quantities), or null when no economic control is enabled. */
+  economic_admission: EconomicAdmission | null;
   db_enabled: boolean;
   started_at: number | null;
   stopped_at: number | null;

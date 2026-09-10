@@ -39,6 +39,7 @@ import { BrokerBadge, BrokerHistoryFilter, type BrokerFilter } from "./BoxBroker
 import BoxDeleteModal from "./BoxDeleteModal.tsx";
 import { BoxExecutionHealth } from "./BoxExecutionHealth.tsx";
 import { BoxOrderStreamStatus } from "./BoxOrderStreamStatus.tsx";
+import { BoxOperationalState } from "./BoxOperationalState.tsx";
 import { BoxExecutionAttempts } from "./BoxExecutionAttempts.tsx";
 import { BoxDayPnlStrip } from "./BoxDayPnl.tsx";
 import { BoxGates } from "./BoxGates.tsx";
@@ -1094,6 +1095,13 @@ export default function Box({ onLock }: Props) {
         metrics={status?.metrics}
         mode={status?.execution_mode ?? "paper_latency"}
       />
+
+      {/* The full operational picture for the ACTIVE broker: market-data state + generation and
+          per-instrument readiness, the SEPARATE order-update fill path, entry-blocking reasons,
+          economic admission (gross notional vs margin), and the denominator-carrying funnel. The
+          two health signals are rendered independently — a live quote socket is not evidence that
+          fills are observed. */}
+      <BoxOperationalState status={status} />
 
       {/* Directly below execution health, because "how fast do fills complete" is meaningless
           without knowing HOW a fill is even observed. Separate panel, separate signal. */}
