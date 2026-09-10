@@ -115,6 +115,70 @@ test("HONESTY #1: a live order stream is reported independently of the feed stat
 
 /* ─────────────────────────── honesty rule #2: paused-but-safe ≠ broken ─────────────────────────── */
 
+/**
+ * SECTION 7 — THESE FOUR TESTS NOW ASSERT THE BACKEND'S VERDICT, NOT A LOCAL DERIVATION.
+ *
+ * They previously called `deriveEntryGate(md, os)` with no backend decision, because the frontend
+ * computed entry permission itself from market-data readiness plus one reconcile flag. That was
+ * defect (b): a SECOND permission matrix, which missed nearly every real blocker and showed a green
+ * "New entry is permitted" while the backend refused every entry.
+ *
+ * Every scenario below is PRESERVED exactly. What changed is where the verdict comes from: a
+ * `decision` built to mirror what the backend publishes for that same situation. So each test now
+ * proves the panel RENDERS the backend answer for that scenario, which is strictly more than it
+ * proved before — a frontend that quietly reverted to deriving its own answer would fail here.
+ */
+
+/** A backend readiness decision, shaped exactly as `box_status.operational_readiness` arrives. */
+function decisionFor({
+  marketData = "READY",
+  orderStream = "READY",
+  entryPermitted = true,
+  entryReasons = [],
+  exitAndReduce = true,
+  protectiveCancel = true,
+  reductionReasons = [],
+  reconcilePending = false,
+  generation = 1,
+} = {}) {
+  return {
+    decision_generation: generation,
+    decision_version: "1.6.0",
+    decided_at: 1_700_000_000_000,
+    identity: {
+      broker: "zerodha", account_masked: "AB••34", account_present: true,
+      execution_mode: "live", live_runtime_armed: true, deployment_live_capable: true,
+    },
+    market_data: {
+      state: marketData, generation: 3, desired_instruments: 4, ready_instruments: 4,
+      backlog: false, usable_for_entry: marketData === "READY",
+    },
+    order_stream: {
+      lifecycle: orderStream, published_state: orderStream === "READY" ? "LIVE" : "DEGRADED",
+      wiring: "armed", gate_enabled: true, connected: true, authorised: true, disconnects: 0,
+    },
+    fill_observation: {
+      mechanism: orderStream === "READY" ? "stream_primary_rest_reconcile" : "rest_polling_only",
+      stream_assisted: orderStream === "READY",
+      detail: "mechanism detail",
+    },
+    evidence: {
+      market_data_frame_age_ms: 100, market_data_heartbeat_age_ms: 100,
+      market_data_depth_age_ms: 150, order_stream_event_age_ms: 900,
+    },
+    reconciliation: { pending: reconcilePending, blockers: [] },
+    entry: { permitted: entryPermitted, reasons: entryReasons },
+    exposure_management: {
+      exit_and_reduce: exitAndReduce,
+      protective_cancel: protectiveCancel,
+      manage_working_orders: true,
+      blocked_reasons: reductionReasons,
+      limitations: ["A reduction is itself an order into the market: permission is not a fill."],
+      open_positions: 1, residual_legs: 0, working_orders: 0,
+    },
+  };
+}
+
 test("HONESTY #2: a reconnecting/degraded feed is PAUSED with positions still manageable", () => {
   for (const state of ["CONNECTING", "AUTHENTICATING", "SYNCHRONIZING", "DEGRADED"]) {
     const md = deriveMarketData({
@@ -124,7 +188,14 @@ test("HONESTY #2: a reconnecting/degraded feed is PAUSED with positions still ma
         lastHeartbeatAt: 1, lastFrameAt: 1, lastDepthAt: null, backlog: false,
       },
     });
-    const gate = deriveEntryGate(md, null);
+    // The backend refuses entry for this transport state, and keeps exposure manageable.
+    const decision = decisionFor({
+      marketData: state,
+      entryPermitted: false,
+      entryReasons: [{ code: "market_data_lifecycle", scope: "entry", detail: `market data is ${state}` }],
+      exitAndReduce: true,
+    });
+    const gate = deriveEntryGate(md, null, decision);
     assert.equal(gate.entryPermitted, false, `${state}: entry must be paused`);
     assert.equal(gate.overallBand, "paused", `${state}: band is paused, not broken`);
     assert.equal(gate.positionsManageable, true, `${state}: positions remain manageable`);
@@ -140,10 +211,17 @@ test("HONESTY #2: a disconnected feed is BROKEN, and an expired session is broke
         readyInstruments: 0, lastHeartbeatAt: null, lastFrameAt: null, lastDepthAt: null, backlog: false },
     }),
     null,
+    // A disconnected feed cannot price a reduction, but a protective cancel still reduces exposure.
+    decisionFor({
+      marketData: "DISCONNECTED", entryPermitted: false,
+      entryReasons: [{ code: "market_data_disconnected", scope: "entry", detail: "the socket is closed" }],
+      exitAndReduce: false, protectiveCancel: true,
+      reductionReasons: [{ code: "market_data_disconnected", scope: "reduction", detail: "no current book to price against" }],
+    }),
   );
   assert.equal(disc.overallBand, "broken");
   assert.equal(disc.entryPermitted, false);
-  assert.equal(disc.positionsManageable, true, "disconnected still permits exit/cancel");
+  assert.equal(disc.protectiveCancelPermitted, true, "disconnected still permits a protective cancel");
 
   const expired = deriveEntryGate(
     deriveMarketData({
@@ -152,9 +230,16 @@ test("HONESTY #2: a disconnected feed is BROKEN, and an expired session is broke
         readyInstruments: 0, lastHeartbeatAt: null, lastFrameAt: null, lastDepthAt: null, backlog: false },
     }),
     null,
+    decisionFor({
+      marketData: "AUTH_EXPIRED", entryPermitted: false,
+      entryReasons: [{ code: "market_data_session_expired", scope: "both", detail: "the session expired" }],
+      exitAndReduce: false, protectiveCancel: false,
+      reductionReasons: [{ code: "market_data_session_expired", scope: "reduction", detail: "the broker will refuse a priced reduction" }],
+    }),
   );
   assert.equal(expired.overallBand, "broken");
   assert.equal(expired.positionsManageable, false, "an expired session is not freely manageable");
+  assert.ok(expired.reductionBlockedReasons.length > 0, "and the reduction blocker is stated");
 });
 
 test("HONESTY #2: a reconnected order stream owing reconciliation pauses entry with a clear reason", () => {
@@ -166,14 +251,26 @@ test("HONESTY #2: a reconnected order stream owing reconciliation pauses entry w
   const osBroker = {
     broker: "zerodha", wiring: "armed", gate_env_var: "ZERODHA_ORDER_STREAM_ENABLED", gate_enabled: true,
     health: { state: "RECONNECTED_PENDING_RECONCILE", connected: true, authorised: true, lastEventAt: 5,
-      disconnects: 1, reconcilePending: true, detail: "reconnected" },
+      disconnects: 1, reconcilePending: true, detail: "reconnected", lifecycle: "RECONCILING" },
+    lifecycle: "RECONCILING",
     fills_observed_by: "rest_polling_only", detail: "reconnected, reconciliation owed",
   };
   const os = deriveActiveOrderStream(
     { any_stream_live: false, market_data_health_is_not_order_stream_health: true, brokers: [osBroker] },
     "zerodha",
   );
-  const gate = deriveEntryGate(md, os.active);
+  const gate = deriveEntryGate(
+    md,
+    os.active,
+    decisionFor({
+      orderStream: "RECONCILING", reconcilePending: true, entryPermitted: false,
+      entryReasons: [{
+        code: "order_stream_lifecycle", scope: "entry",
+        detail: "the order-update stream connected and a REST reconciliation is owed",
+      }],
+      exitAndReduce: true,
+    }),
+  );
   assert.equal(gate.entryPermitted, false, "READY feed but reconciliation owed → entry still paused");
   assert.equal(gate.overallBand, "paused");
   assert.ok(
@@ -183,16 +280,33 @@ test("HONESTY #2: a reconnected order stream owing reconciliation pauses entry w
   assert.equal(gate.positionsManageable, true);
 });
 
-test("entry is permitted ONLY when the feed is READY and no reconciliation is owed", () => {
+test("entry is permitted ONLY when the BACKEND says so — a READY feed is not sufficient on its own", () => {
   const md = deriveMarketData({
     market_data_state: "READY",
     market_data_health: { state: "READY", generation: 3, desired: 4, confirmed: 4, readyInstruments: 4,
       lastHeartbeatAt: 1, lastFrameAt: 1, lastDepthAt: 1, backlog: false },
   });
-  const gate = deriveEntryGate(md, null);
-  assert.equal(gate.entryPermitted, true);
-  assert.deepEqual(gate.entryPausedReasons, []);
-  assert.equal(gate.overallBand, "ready");
+
+  // The backend permits it: the panel shows green.
+  const permitted = deriveEntryGate(md, null, decisionFor({ entryPermitted: true }));
+  assert.equal(permitted.entryPermitted, true);
+  assert.deepEqual(permitted.entryPausedReasons, []);
+  assert.equal(permitted.overallBand, "ready");
+
+  // THE DEFECT, INVERTED: identical READY market data, but the backend refuses (PostgreSQL is the
+  // authoritative store and it is unavailable). Pre-fix this rendered green because the frontend
+  // never consulted the backend at all.
+  const refused = deriveEntryGate(
+    md,
+    null,
+    decisionFor({
+      entryPermitted: false,
+      entryReasons: [{ code: "postgres_unavailable", scope: "entry", detail: "PostgreSQL is unavailable" }],
+    }),
+  );
+  assert.equal(refused.entryPermitted, false, "a READY feed cannot override the backend's refusal");
+  assert.equal(refused.overallBand, "paused");
+  assert.deepEqual(refused.entryPausedReasons, ["PostgreSQL is unavailable"]);
 });
 
 /* ─────────────────────────── gross notional ≠ margin ─────────────────────────── */

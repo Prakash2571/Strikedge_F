@@ -26,7 +26,8 @@
         "gate_enabled": false,
         "health": null,
         "fills_observed_by": "rest_polling_only",
-        "detail": "An order-update stream for zerodha is implemented and unit-tested, but NO running component is consuming it, so it cannot deliver a fill. Fills are observed by REST polling only. ZERODHA_ORDER_STREAM_ENABLED is also unset. This requires supervised live validation before it is relied upon."
+        "detail": "An order-update stream for zerodha is implemented and unit-tested, but NO running component is consuming it, so it cannot deliver a fill. Fills are observed by REST polling only. ZERODHA_ORDER_STREAM_ENABLED is also unset. This requires supervised live validation before it is relied upon.",
+        "lifecycle": null
       },
       {
         "broker": "dhan",
@@ -35,7 +36,8 @@
         "gate_enabled": false,
         "health": null,
         "fills_observed_by": "rest_polling_only",
-        "detail": "An order-update stream for dhan is implemented and unit-tested, but NO running component is consuming it, so it cannot deliver a fill. Fills are observed by REST polling only. DHAN_ORDER_STREAM_ENABLED is also unset. This requires supervised live validation before it is relied upon."
+        "detail": "An order-update stream for dhan is implemented and unit-tested, but NO running component is consuming it, so it cannot deliver a fill. Fills are observed by REST polling only. DHAN_ORDER_STREAM_ENABLED is also unset. This requires supervised live validation before it is relied upon.",
+        "lifecycle": null
       }
     ]
   },
@@ -74,11 +76,36 @@
     "economically_profitable": 0,
     "economically_unprofitable": 0,
     "ratios": {
-      "admission_rate": { "numerator": 0, "denominator": 0, "rate": null, "basis": "admitted attempts / qualified opportunities" },
-      "submission_rate": { "numerator": 0, "denominator": 0, "rate": null, "basis": "attempts with >=1 real broker POST / admitted attempts" },
-      "execution_completion_rate": { "numerator": 0, "denominator": 0, "rate": null, "basis": "four-leg completed entries / attempts with >=1 real broker POST (excludes zero-POST local refusals; includes every broker-facing attempt)" },
-      "economic_success_rate": { "numerator": 0, "denominator": 0, "rate": null, "basis": "economically profitable outcomes / four-leg completed entries (economic success is NOT execution completion)" },
-      "unresolved_exposure_rate": { "numerator": 0, "denominator": 0, "rate": null, "basis": "attempts that ended with unresolved exposure / admitted attempts" }
+      "admission_rate": {
+        "numerator": 0,
+        "denominator": 0,
+        "rate": null,
+        "basis": "admitted attempts / qualified opportunities"
+      },
+      "submission_rate": {
+        "numerator": 0,
+        "denominator": 0,
+        "rate": null,
+        "basis": "attempts with >=1 real broker POST / admitted attempts"
+      },
+      "execution_completion_rate": {
+        "numerator": 0,
+        "denominator": 0,
+        "rate": null,
+        "basis": "four-leg completed entries / attempts with >=1 real broker POST (excludes zero-POST local refusals; includes every broker-facing attempt)"
+      },
+      "economic_success_rate": {
+        "numerator": 0,
+        "denominator": 0,
+        "rate": null,
+        "basis": "economically profitable outcomes / four-leg completed entries (economic success is NOT execution completion)"
+      },
+      "unresolved_exposure_rate": {
+        "numerator": 0,
+        "denominator": 0,
+        "rate": null,
+        "basis": "attempts that ended with unresolved exposure / admitted attempts"
+      }
     }
   },
   "economic_admission": null,
@@ -358,7 +385,7 @@
     "expiry_safety_minutes": 45,
     "max_subscribed_tokens": 2200,
     "lots": 1,
-    "universe": "NSE F&O options only \u2014 F&O stocks + supported indices",
+    "universe": "NSE F&O options only — F&O stocks + supported indices",
     "indicative_discovery": true,
     "closed_cache_enabled": false,
     "tunable": {
@@ -370,6 +397,92 @@
         "min": 0,
         "max": 1000000
       }
+    }
+  },
+  "operational_readiness": {
+    "decision_generation": 1,
+    "decision_version": "1.6.0",
+    "decided_at": 1789048047769,
+    "identity": {
+      "broker": "zerodha",
+      "account_masked": null,
+      "account_present": false,
+      "execution_mode": "paper_latency",
+      "live_runtime_armed": false,
+      "deployment_live_capable": false
+    },
+    "market_data": {
+      "state": "DISABLED",
+      "generation": 0,
+      "desired_instruments": 0,
+      "ready_instruments": 0,
+      "backlog": false,
+      "usable_for_entry": false
+    },
+    "order_stream": {
+      "lifecycle": "DISABLED",
+      "published_state": "DISABLED",
+      "wiring": "not_wired",
+      "gate_enabled": false,
+      "connected": false,
+      "authorised": false,
+      "disconnects": 0
+    },
+    "fill_observation": {
+      "mechanism": "rest_polling_only",
+      "stream_assisted": false,
+      "detail": "REST polling is observing fills. Fill-observation latency is bounded by the polling cadence and the pacing floor, not by broker push latency."
+    },
+    "evidence": {
+      "market_data_frame_age_ms": null,
+      "market_data_heartbeat_age_ms": null,
+      "market_data_depth_age_ms": null,
+      "order_stream_event_age_ms": null
+    },
+    "reconciliation": {
+      "pending": false,
+      "blockers": []
+    },
+    "entry": {
+      "permitted": false,
+      "reasons": [
+        {
+          "code": "market_data_not_configured",
+          "scope": "both",
+          "detail": "Market data is not armed, so there is no pricing basis for any decision."
+        },
+        {
+          "code": "scanner_stopped",
+          "scope": "entry",
+          "detail": "The scanner is STOPPED, so no new box will be entered. Existing positions continue to be monitored and can still be exited, reduced and protectively cancelled."
+        },
+        {
+          "code": "market_closed",
+          "scope": "entry",
+          "detail": "The exchange is closed: prices shown are last-close and nothing can be entered."
+        }
+      ]
+    },
+    "exposure_management": {
+      "exit_and_reduce": false,
+      "protective_cancel": false,
+      "manage_working_orders": false,
+      "blocked_reasons": [
+        {
+          "code": "market_data_not_configured",
+          "scope": "reduction",
+          "detail": "Market data is not armed, so a reduction cannot be priced at all."
+        }
+      ],
+      "limitations": [
+        "A reduction is itself an order into the market: it can partially fill, be rejected, or fill at a worse price. Permission is not a fill.",
+        "Four-leg atomicity is not available from any broker; legs are reduced one order at a time and an intermediate state is unavoidable.",
+        "A reduction needs a usable book for the leg being reduced. Whole-feed readiness is not required, but an unpriceable leg cannot be reduced on a limit price.",
+        "Protective cancellation reduces exposure and is permitted in every state except an expired session, where the broker itself refuses."
+      ],
+      "open_positions": 0,
+      "residual_legs": 0,
+      "working_orders": 0
     }
   }
 }

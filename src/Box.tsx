@@ -31,6 +31,17 @@ import {
 import { accessStatus } from "./api/access.ts";
 import { onUnauthorized } from "./api/http.ts";
 import { ReconnectingBoxStream } from "./lib/boxStream.ts";
+// SECTION 7: the three ways a correct backend answer still gets displayed wrongly — an
+// out-of-order response overwriting newer state, a failed refresh leaving stale data looking
+// current, and a double-submitted mutation. All three are guarded by these pure helpers.
+import {
+  ControlRequests,
+  RefreshTracker,
+  acceptStatus,
+  decisionGenerationOf,
+  runOnce,
+} from "./lib/statusIntegrity.ts";
+import { explainScannerStop, modeLabel } from "./lib/honestLabels.ts";
 import { fmt, formatExpiry } from "./format.ts";
 import ThemeToggle from "./ThemeToggle.tsx";
 import BrandMark from "./BrandMark.tsx";
@@ -242,13 +253,72 @@ export default function Box({ onLock }: Props) {
    */
   const fullRows = useRef<Set<string>>(new Set());
 
+  /* ───────────────────── SECTION 7: status integrity ───────────────────── */
+
+  /**
+   * The highest readiness generation ALREADY rendered.
+   *
+   * `box_status` reaches this component from five independent places (the initial REST load, the
+   * opportunities fetch, the SSE snapshot flush, and the responses to the scanner and strike-level
+   * mutations). They are separate requests and can resolve out of order, so a slow OLDER response
+   * could land after a newer one and silently rewind the dashboard — including rewinding a fresh
+   * "entry blocked" back to a stale "entry permitted".
+   *
+   * Held in a REF, not state: the comparison has to be correct for two responses that land in the
+   * same frame, and a state value read from a render closure would be stale for the second of them.
+   */
+  const renderedGeneration = useRef<number | null>(null);
+
+  /**
+   * The ONE guarded way this component accepts a status payload.
+   *
+   * Everything that used to call `setStatus` directly now goes through here, so the ordering rule is
+   * applied in one place rather than remembered at five call sites.
+   */
+  const applyStatus = useCallback((incoming: BoxStatus | null | undefined): boolean => {
+    if (!acceptStatus(renderedGeneration.current, incoming)) return false;
+    const gen = decisionGenerationOf(incoming);
+    if (gen !== null) renderedGeneration.current = gen;
+    setStatus(incoming as BoxStatus);
+    return true;
+  }, []);
+
+  /**
+   * Runtime-status refresh health.
+   *
+   * The poll below used `.catch(() => {})`, so once the endpoint began failing the last good
+   * snapshot simply stayed on screen — indistinguishable from a healthy system. This records the
+   * outcome so the readiness banners can go stale/unknown instead of confidently wrong. 12s is
+   * ~2 missed polls at the 5s cadence.
+   */
+  const runtimeRefresh = useRef(new RefreshTracker(12_000));
+  const [runtimeFreshness, setRuntimeFreshness] = useState(() => runtimeRefresh.current.state(Date.now()));
+
+  /**
+   * In-flight control mutations, per DISTINCT control class.
+   *
+   * A ref-held synchronous registry, because a `disabled={busy}` guard cannot stop a double-click
+   * that happens before React re-renders. Per-class (rather than one global flag) so an emergency
+   * action is never queued behind an unrelated control.
+   */
+  const controls = useRef(new ControlRequests());
+
   const running = status?.running === true;
+
+  /**
+   * The mode label for the page header, from the BACKEND's own `execution_mode`.
+   *
+   * Not a constant, and not derived from whether the live controls happen to be armed: a live
+   * deployment with its controls disarmed is still live, one toggle away from real orders.
+   */
+  const headerMode = modeLabel(status?.execution_mode);
 
   /* --------------------------------- load -------------------------------- */
 
   const loadStatus = useCallback(async () => {
     try {
-      setStatus(await fetchBoxStatus());
+      // Guarded: an older in-flight response must never overwrite newer rendered state.
+      applyStatus(await fetchBoxStatus());
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load box status.");
@@ -387,23 +457,52 @@ export default function Box({ onLock }: Props) {
     fetchBoxOpportunities()
       .then((r) => {
         setOpportunities(r.opportunities);
-        setStatus(r.status);
+        applyStatus(r.status);
       })
       .catch(() => {});
   }, [canTrade, loadStatus, loadExecutionControl, loadToday, loadHistory]);
 
-  // Whole-system readiness + async reporting-replica status, polled on a slow cadence. Both
-  // fail soft: a missing runtime endpoint just means no readiness banner, never a broken
-  // dashboard.
+  /**
+   * Whole-system readiness + async reporting-replica status, polled on a slow cadence.
+   *
+   * SECTION 7 — A FAILED REFRESH IS NOW VISIBLE. This used to be
+   * `fetchRuntimeStatus().then(setRuntime).catch(() => {})`. When the endpoint started failing, the
+   * last good snapshot stayed on screen unchanged, indistinguishable from a healthy system, for as
+   * long as the failure lasted. Every outcome is now recorded, and the age/failure is published to
+   * the banners so an expired or failed refresh visibly becomes STALE or UNKNOWN.
+   *
+   * The last successful payload is deliberately KEPT rather than cleared: its content is still the
+   * most recent thing known, and blanking it would replace one lie ("this is current") with another
+   * ("there is nothing"). What changes is that its true age is now stated.
+   */
   useEffect(() => {
     if (!canTrade) return;
     const poll = () => {
-      fetchRuntimeStatus().then(setRuntime).catch(() => {});
+      fetchRuntimeStatus()
+        .then((r) => {
+          setRuntime(r);
+          runtimeRefresh.current.recordSuccess(Date.now());
+        })
+        .catch((err: unknown) => {
+          runtimeRefresh.current.recordFailure(
+            err instanceof Error ? err.message : "the readiness refresh failed",
+          );
+        })
+        .finally(() => setRuntimeFreshness(runtimeRefresh.current.state(Date.now())));
       fetchExportStatus().then(setExportStatus).catch(() => {});
     };
     poll();
     const t = window.setInterval(poll, 5000);
-    return () => window.clearInterval(t);
+    // A second, faster timer re-evaluates FRESHNESS even when no poll resolves: data goes stale by
+    // the passage of time, not by an event, so nothing else would ever notice.
+    const age = window.setInterval(
+      () => setRuntimeFreshness(runtimeRefresh.current.state(Date.now())),
+      2000,
+    );
+    return () => {
+      window.clearInterval(t);
+      window.clearInterval(age);
+    };
   }, [canTrade]);
 
   // A 401 anywhere returns the whole app to the gate. The http wrapper already fires this
@@ -420,7 +519,7 @@ export default function Box({ onLock }: Props) {
       const snap = pending.current;
       if (!snap) return;
       pending.current = null;
-      setStatus(snap.status);
+      applyStatus(snap.status);
       setOpportunities(snap.opportunities);
       setOpen(snap.open_trades);
       // Entry cue is driven off this live open set (first frame is baseline). Purely a
@@ -523,40 +622,63 @@ export default function Box({ onLock }: Props) {
   /* -------------------------------- actions ------------------------------- */
 
   async function toggleScanner() {
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const next = running ? await stopBoxScanner() : await startBoxScanner();
-      setStatus(next);
-      setNotice(
-        running
-          ? "Scanner stopped. No new boxes will be opened — open positions are still monitored and can still auto-exit."
-          : "Scanner running. Qualifying boxes will be paper-opened automatically.",
-      );
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to change the scanner state.");
-    } finally {
-      setBusy(false);
-    }
+    // SECTION 7 — SINGLE-FLIGHT. The old guard was `setBusy(true)` plus `disabled={busy}`, which
+    // reads `busy` from the render closure: two clicks in the same frame BOTH saw `false` and BOTH
+    // fired. `runOnce` claims the slot synchronously, so the second click is refused here, before
+    // the network. The backend remains the authority on whether the action is ALLOWED — this only
+    // stops the same authorised action being submitted twice.
+    const wasRunning = running;
+    const outcome = await runOnce(controls.current, "scanner", async () => {
+      setBusy(true);
+      setError(null);
+      setNotice(null);
+      try {
+        const next = wasRunning ? await stopBoxScanner() : await startBoxScanner();
+        applyStatus(next);
+        if (wasRunning) {
+          // SCANNER STOP must say, unambiguously and SEPARATELY, what happens to entry and what
+          // happens to positions already open. Merging them into one sentence is how "stopped
+          // scanning" gets read as "stopped watching my open box".
+          const stop = explainScannerStop(next.monitoring, next.operational_readiness);
+          setNotice(`${stop.headline} ${stop.entryEffect} ${stop.positionsEffect}`);
+        } else {
+          const label = modeLabel(next.execution_mode);
+          setNotice(
+            label.live
+              ? "Scanner running. Qualifying boxes will be entered with REAL orders automatically — " +
+                "no fill, four-leg completion or maximum loss is guaranteed."
+              : `Scanner running. Qualifying boxes will be opened in the ${label.badge} simulation ` +
+                `automatically. No order reaches any broker.`,
+          );
+        }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to change the scanner state.");
+      } finally {
+        setBusy(false);
+      }
+    });
+    if (!outcome.sent) setNotice(outcome.reason);
   }
 
   async function handleStrikeLevel(level: 1 | 2 | 3) {
     if (status?.strike_level === level) return;
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const next = await setBoxStrikeLevel(level);
-      setStatus(next);
-      setNotice(
-        `Now monitoring ATM ±${level}. New boxes are limited to this window — positions already open are unaffected and keep being monitored.`,
-      );
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to set the strike level.");
-    } finally {
-      setBusy(false);
-    }
+    const outcome = await runOnce(controls.current, "scanner", async () => {
+      setBusy(true);
+      setError(null);
+      setNotice(null);
+      try {
+        const next = await setBoxStrikeLevel(level);
+        applyStatus(next);
+        setNotice(
+          `Now monitoring ATM ±${level}. New boxes are limited to this window — positions already open are unaffected and keep being monitored.`,
+        );
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to set the strike level.");
+      } finally {
+        setBusy(false);
+      }
+    }, `strike-${level}`);
+    if (!outcome.sent) setNotice(outcome.reason);
   }
 
   async function handleClose(id: string) {
@@ -590,7 +712,7 @@ export default function Box({ onLock }: Props) {
     setNotice(null);
     try {
       const result = await deleteBoxTrade(id, reason);
-      setStatus(result.status);
+      applyStatus(result.status);
       setOpen(result.open ?? []);
       // Drop it from whichever list is on screen, then adopt the server's corrected
       // closed-today rows so the Closed tab and its totals agree with the backend.
@@ -755,7 +877,13 @@ export default function Box({ onLock }: Props) {
           <BrandMark />
           <div className="card-title">
             <h1>StrikeEdge</h1>
-            <span className="an-underline">Box arbitrage · paper trading, one lot</span>
+            {/* SECTION 7: the subtitle is DERIVED from the backend's own execution_mode. It was a
+                literal "paper trading", which kept claiming paper under BOX_EXECUTION_MODE=live —
+                the single most dangerous label a trading UI can get wrong, because it invites an
+                operator to press a button they would not press if it said LIVE. */}
+            <span className={`an-underline ${headerMode.live ? "is-bad" : ""}`} title={headerMode.detail}>
+              {headerMode.subtitle}
+            </span>
           </div>
         </div>
 
@@ -840,7 +968,7 @@ export default function Box({ onLock }: Props) {
       <BrokerStatusPanel runtime={runtime} />
 
       {/* Plain-language whole-system readiness, without exposing any secret. */}
-      <RuntimeStatusBanners runtime={runtime} exportStatus={exportStatus} />
+      <RuntimeStatusBanners runtime={runtime} exportStatus={exportStatus} refresh={runtimeFreshness} />
 
       {error && <div className="banner banner--error">{error}</div>}
       {notice && !error && <div className="banner banner--info">{notice}</div>}
@@ -1059,7 +1187,7 @@ export default function Box({ onLock }: Props) {
         cfg={cfg}
         canTrade={canTrade}
         onSaved={(next) => {
-          setStatus(next.status);
+          applyStatus(next.status);
           setNotice(null);
         }}
       />

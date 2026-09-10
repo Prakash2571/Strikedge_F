@@ -36,6 +36,13 @@ const OUT_PATH = resolve(HERE, "..", "src", "api", "contract.generated.ts");
 const SUPPORTED = new Set([
   "type", "required", "properties", "additionalProperties", "items", "prefixItems",
   "enum", "const", "oneOf", "anyOf", "$ref", "minimum", "maximum", "format",
+  // `minItems` carries a real TYPE obligation, so it is rendered rather than ignored: a
+  // minItems:1 array becomes a NON-EMPTY tuple type `[T, ...T[]]`. This matters for
+  // operational-readiness.exposure_management.limitations, which must never be empty — an
+  // empty limitations list would read as "reducing exposure carries no caveats". Encoding it
+  // in the type means a component can rely on the first element existing, and TypeScript
+  // rejects an accidental `[]` at the boundary rather than deferring to a runtime check.
+  "minItems",
 ]);
 const IGNORED = new Set([
   "$schema", "$id", "title", "description", "$comment", "examples", "default",
@@ -191,7 +198,16 @@ function renderArray(schema, path, refNames) {
     return `[${tuple.join(", ")}]`;
   }
   if (Object.prototype.hasOwnProperty.call(schema, "items")) {
-    return `${wrapParens(renderType(schema.items, `${path}.items`, refNames))}[]`;
+    const item = wrapParens(renderType(schema.items, `${path}.items`, refNames));
+    // minItems -> a leading tuple of that many required elements, then a rest. `minItems: 1`
+    // renders `[T, ...T[]]`, which makes "never empty" a TYPE guarantee instead of a comment:
+    // the compiler rejects `[]` at the boundary, so a caller may read the first element safely.
+    const min = schema.minItems;
+    if (typeof min === "number" && Number.isInteger(min) && min > 0) {
+      const head = Array.from({ length: min }, () => item).join(", ");
+      return `[${head}, ...${item}[]]`;
+    }
+    return `${item}[]`;
   }
   // array with no item schema: unknown[]
   return `unknown[]`;

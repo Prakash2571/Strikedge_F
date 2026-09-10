@@ -31,7 +31,7 @@
  * The confirmation is UX only; the backend validates every precondition itself.
  */
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import {
   previewBoxExecutionMode,
   setBoxLiveControl,
@@ -40,6 +40,9 @@ import {
   type BoxExecutionSelection,
   type BoxModeTransitionVerdict,
 } from "./api";
+// SECTION 7: distinct control classes plus a SYNCHRONOUS single-flight guard, so a double-click
+// cannot double-submit and an unrelated in-flight request cannot disable the emergency control.
+import { ControlRequests, runOnce, type ControlClass } from "./lib/statusIntegrity.ts";
 
 /** ₹ in Indian digit grouping, e.g. 120000 -> "₹1,20,000". */
 function rupees(v: number | null | undefined): string {
@@ -90,11 +93,29 @@ export function BoxExecutionControl({
   isFullAdmin: boolean;
   onChanged: () => void;
 }) {
+  /**
+   * SECTION 7 — PER-CONTROL-CLASS pending state, not one global flag.
+   *
+   * `busy` still drives the "…" label on the button that was pressed, but it no longer decides
+   * whether OTHER controls are usable. The old single flag conflated four genuinely distinct
+   * authorities — entry arming, live-order management, emergency actions and session arming — and
+   * disabled all of them while any one request was in flight. Blocking the EMERGENCY control because
+   * someone had just clicked "arm entry" is strictly more dangerous than allowing it.
+   */
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [preview, setPreview] = useState<BoxModeTransitionVerdict | null>(null);
   const [confirmEntry, setConfirmEntry] = useState(false);
+  /**
+   * The SYNCHRONOUS in-flight registry.
+   *
+   * Held in a ref because a `disabled={busy !== null}` guard cannot stop a double-click that happens
+   * before React re-renders: both handlers read the same pre-update `busy` from their render
+   * closure, and both fire. `ControlRequests.begin` mutates a Set immediately, so the second click
+   * is refused here rather than at the broker.
+   */
+  const requests = useRef(new ControlRequests());
 
   if (!canTrade || !control) return null;
 
@@ -104,19 +125,37 @@ export function BoxExecutionControl({
   const risk = control.risk;
   const exec = control.execution;
 
-  async function run(key: string, fn: () => Promise<unknown>, okNote?: string) {
-    setBusy(key);
-    setError(null);
-    setNote(null);
-    try {
-      await fn();
-      if (okNote) setNote(okNote);
-      onChanged();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "The request failed.");
-    } finally {
-      setBusy(null);
-    }
+  /**
+   * Run one control mutation, at most once per control class in flight.
+   *
+   * `cls` is the DISTINCT authority being exercised; `key` is only the label shown on the pressed
+   * button. A refused duplicate reports itself instead of silently doing nothing — a button that
+   * appears to do nothing is how an operator ends up clicking it a third time.
+   *
+   * The backend re-authorises every one of these calls. This guard is a double-submit guard and
+   * nothing more: a UI restriction is not a security boundary.
+   */
+  async function run(
+    cls: ControlClass,
+    key: string,
+    fn: () => Promise<unknown>,
+    okNote?: string,
+  ) {
+    const outcome = await runOnce(requests.current, cls, async () => {
+      setBusy(key);
+      setError(null);
+      setNote(null);
+      try {
+        await fn();
+        if (okNote) setNote(okNote);
+        onChanged();
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "The request failed.");
+      } finally {
+        setBusy(null);
+      }
+    });
+    if (!outcome.sent) setNote(outcome.reason);
   }
 
   async function selectMode(selection: BoxExecutionSelection) {
@@ -146,6 +185,7 @@ export function BoxExecutionControl({
         return;
       }
       await run(
+        "mode",
         "profile",
         () => setBoxPaperProfile(profile),
         `Execution profile changed. ${selection === "paper_legging_live_parity"
@@ -303,7 +343,7 @@ export function BoxExecutionControl({
               // Only the two paper LEGGING profiles are switchable at runtime. Everything else is a
               // report, so it is rendered inert rather than as a control that cannot work.
               disabled={
-                busy !== null ||
+                busy === "mode" ||
                 unavailable ||
                 !isFullAdmin ||
                 active ||
@@ -372,9 +412,10 @@ export function BoxExecutionControl({
             <button
               type="button"
               className="btn btn--sm"
-              disabled={!isFullAdmin || busy !== null}
+              disabled={!isFullAdmin || busy === "live_orders"}
               onClick={() =>
                 void run(
+                  "live_order_management",
                   "live_orders",
                   () => setBoxLiveControl("box_live_order_enabled", !control.live_runtime_armed),
                 )
@@ -395,9 +436,10 @@ export function BoxExecutionControl({
             <button
               type="button"
               className="btn btn--sm"
-              disabled={!isFullAdmin || busy !== null}
+              disabled={!isFullAdmin || busy === "flatten"}
               onClick={() =>
                 void run(
+                  "emergency",
                   "flatten",
                   () => setBoxLiveControl("box_emergency_flatten", !control.emergency_flatten_enabled),
                 )
@@ -415,10 +457,10 @@ export function BoxExecutionControl({
             <button
               type="button"
               className={`btn btn--sm${control.entry_enabled ? "" : " btn--danger"}`}
-              disabled={!isFullAdmin || busy !== null || (!control.entry_enabled && !control.arm.entry.ok)}
+              disabled={!isFullAdmin || busy === "entry" || (!control.entry_enabled && !control.arm.entry.ok)}
               onClick={() => {
                 if (control.entry_enabled) {
-                  void run("entry", () => setBoxLiveControl("box_entry_enabled", false));
+                  void run("entry_arming", "entry", () => setBoxLiveControl("box_entry_enabled", false));
                 } else {
                   setConfirmEntry(true);
                 }
@@ -489,10 +531,10 @@ export function BoxExecutionControl({
             <button
               type="button"
               className="btn btn--danger btn--sm"
-              disabled={busy !== null}
+              disabled={busy === "entry"}
               onClick={() => {
                 setConfirmEntry(false);
-                void run("entry", () => setBoxLiveControl("box_entry_enabled", true), "Live entry ENABLED.");
+                void run("entry_arming", "entry", () => setBoxLiveControl("box_entry_enabled", true), "Live entry ENABLED.");
               }}
             >
               Yes, enable real entry
