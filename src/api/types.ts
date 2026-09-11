@@ -233,14 +233,50 @@ export interface BoxConfigView {
  *
  * NO SECRET APPEARS HERE. `gate_env_var` is a variable NAME only, never a value.
  */
+/**
+ * ORDER-UPDATE LIFECYCLE — the AUTHORITATIVE order-stream state (contract v1.6.0).
+ *
+ * Mirrors `OrderStreamLifecycleState` in the backend `src/box/streamHealthPolicy.ts`. This is the
+ * value the backend's live-entry gate actually scores, and it is now published so the frontend
+ * never has to infer it. Its absence was defect (a): the lifecycle could be `DEGRADED` while the
+ * published `state` below said `LIVE`, so the dashboard advertised the fast fill path at the moment
+ * entry was being refused for the opposite reason.
+ */
+export type OrderStreamLifecycle =
+  | "DISABLED"
+  | "CONNECTING"
+  | "AUTHENTICATING"
+  | "RECONCILING"
+  | "READY"
+  | "DEGRADED"
+  | "DISCONNECTED"
+  | "AUTH_EXPIRED";
+
 export interface OrderStreamHealthSnapshot {
-  state: "DISABLED" | "DOWN" | "CONNECTING" | "LIVE" | "RECONNECTED_PENDING_RECONCILE";
+  /**
+   * The PUBLISHED state, DERIVED by the backend from `lifecycle` below (see
+   * `publishedStateForLifecycle` in src/box/orderStreamConsumer.ts), so the two cannot disagree.
+   *
+   * `DEGRADED` (v1.6.0) means connected but NOT delivering while a fill is expected.
+   * `AUTH_EXPIRED` (v1.6.0) is distinct from `DOWN`: reconnecting with a rejected credential is
+   * pointless, so it must not be rendered as a transient drop.
+   */
+  state:
+    | "DISABLED"
+    | "DOWN"
+    | "CONNECTING"
+    | "LIVE"
+    | "DEGRADED"
+    | "RECONNECTED_PENDING_RECONCILE"
+    | "AUTH_EXPIRED";
   connected: boolean;
   authorised: boolean;
   lastEventAt: number | null;
   disconnects: number;
   reconcilePending: boolean;
   detail: string;
+  /** The single lifecycle authority `state` was derived from, carried verbatim. */
+  lifecycle: OrderStreamLifecycle;
 }
 
 export interface OrderStreamBrokerStatus {
@@ -250,6 +286,12 @@ export interface OrderStreamBrokerStatus {
   gate_env_var: string;
   gate_enabled: boolean;
   health: OrderStreamHealthSnapshot | null;
+  /**
+   * The AUTHORITATIVE lifecycle that decided `fills_observed_by`, or null when nothing consumes
+   * the stream. Published next to the mechanism so the operator can see both were decided from the
+   * SAME state rather than from two holders that drifted apart.
+   */
+  lifecycle: OrderStreamLifecycle | null;
   fills_observed_by: "rest_polling_only" | "stream_primary_rest_reconcile";
   detail: string;
 }
@@ -439,6 +481,108 @@ export interface EconomicAdmission {
   };
 }
 
+/**
+ * ONE NAMED REASON something is not permitted (contract v1.6.0).
+ *
+ * `scope` is the field that carries the invariant: an `entry`-scoped blocker may stop creating NEW
+ * exposure and can NEVER be a reason a REDUCTION of exposure already owned is refused. The UI must
+ * respect that separation when it renders — presenting an entry restriction next to an exit button
+ * as though it applied to both is how an operator concludes a position is stuck when it is not.
+ */
+export interface ReadinessBlocker {
+  /** Stable snake_case machine code, for keying and grouping. */
+  code: string;
+  scope: "entry" | "reduction" | "both";
+  /** One bounded sentence, safe to display verbatim. */
+  detail: string;
+}
+
+/**
+ * THE ONE AUTHORITATIVE READINESS DECISION (contract v1.6.0) — `box_status.operational_readiness`.
+ *
+ * WHY THE FRONTEND MUST RENDER THIS AND NOT RECOMPUTE IT
+ * Defect (b) was that this file's consumers derived entry permission from market-data readiness plus
+ * a single reconcile flag — a SECOND permission matrix that missed most of the real blockers, and
+ * which showed a green "New entry is permitted" while the backend was refusing every entry. The
+ * backend now answers the question once, from the same permission table its live-entry checkpoint
+ * enforces. Anything the UI computes for itself is a divergence waiting to happen.
+ *
+ * `decision_generation` is monotonic per response: a payload carrying a LOWER value than one already
+ * rendered is STALE and must be IGNORED rather than allowed to overwrite newer state.
+ *
+ * Mirrors `OperationalReadinessDecision` in the backend `src/box/operationalReadiness.ts`. The whole
+ * object is CLOSED in the schema, so `contract.assert.ts` pins it whole-object — a rename, removal
+ * or retype on either side fails `tsc -b`.
+ */
+export interface OperationalReadiness {
+  /** Monotonic per-decision counter. Lower than what is on screen ⇒ stale ⇒ ignore. */
+  decision_generation: number;
+  /** The decision shape's version. An unrecognised value must degrade to unknown, never to green. */
+  decision_version: string;
+  /** Wall-clock ms the decision was evaluated. */
+  decided_at: number;
+  identity: {
+    broker: BrokerId | null;
+    /** MASKED reference, e.g. "AB••34". Never the raw account id. */
+    account_masked: string | null;
+    /** Whether an account is bound at all — distinct from "the id is hidden". */
+    account_present: boolean;
+    execution_mode: string;
+    live_runtime_armed: boolean;
+    deployment_live_capable: boolean;
+  };
+  market_data: {
+    state: MarketDataState;
+    /** Feed/session generation. A book from a superseded socket is not evidence for the new one. */
+    generation: number;
+    desired_instruments: number;
+    ready_instruments: number;
+    backlog: boolean;
+    usable_for_entry: boolean;
+  };
+  order_stream: {
+    lifecycle: OrderStreamLifecycle;
+    published_state: OrderStreamHealthSnapshot["state"];
+    wiring: OrderStreamBrokerStatus["wiring"];
+    gate_enabled: boolean;
+    connected: boolean;
+    authorised: boolean;
+    disconnects: number;
+  };
+  fill_observation: {
+    mechanism: OrderStreamBrokerStatus["fills_observed_by"];
+    stream_assisted: boolean;
+    detail: string;
+  };
+  /** Ages of the evidence behind the decision. NULL = NEVER OBSERVED — must not render as 0. */
+  evidence: {
+    market_data_frame_age_ms: number | null;
+    market_data_heartbeat_age_ms: number | null;
+    market_data_depth_age_ms: number | null;
+    order_stream_event_age_ms: number | null;
+  };
+  reconciliation: {
+    pending: boolean;
+    blockers: ReadinessBlocker[];
+  };
+  /** NEW ENTRY. The UI must never present a permitted state while `permitted` is false. */
+  entry: {
+    permitted: boolean;
+    reasons: ReadinessBlocker[];
+  };
+  /** REDUCING exposure, and its REAL limitations. `limitations` is contractually non-empty. */
+  exposure_management: {
+    exit_and_reduce: boolean;
+    protective_cancel: boolean;
+    manage_working_orders: boolean;
+    blocked_reasons: ReadinessBlocker[];
+    limitations: [string, ...string[]];
+    open_positions: number;
+    residual_legs: number;
+    working_orders: number;
+  };
+}
+
 export interface BoxStatus {
   running: boolean;
   state: "SCANNING" | "MARKET_CLOSED" | "STOPPED";
@@ -474,6 +618,15 @@ export interface BoxStatus {
   market_data_state: MarketDataState;
   /** Market-data state-machine diagnostics: generation, per-instrument readiness, the four time facts, backlog. */
   market_data_health: MarketDataHealth;
+  /**
+   * THE ONE AUTHORITATIVE READINESS DECISION — REQUIRED (contract v1.6.0).
+   *
+   * Deliberately NOT optional, for the same reason `order_stream` is not: an optional field would
+   * let the dashboard typecheck, build and pass its tests while silently rendering nothing — which
+   * is how defect (b) survived. `market_data_state` and `order_stream` above are RAW FACTS; this is
+   * the VERDICT. The UI renders this and does not recombine those facts into a second matrix.
+   */
+  operational_readiness: OperationalReadiness;
   /** The execution funnel — outcome counts with explicit denominators (execution vs economic, separately). */
   execution_funnel: ExecutionFunnelSnapshot;
   /** The last economic-admission decision (five distinct quantities), or null when no economic control is enabled. */

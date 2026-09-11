@@ -38,6 +38,8 @@ import type {
   AccessVerifyContract,
   ArmVerdictContract,
   BoxExecutionControlContract,
+  OperationalReadinessContract,
+  ReadinessBlockerContract,
   BoxOpenPositionContract,
   BoxOpportunityContract,
   BoxStatusContract,
@@ -63,6 +65,8 @@ import type {
   BrokerTokenRuntime,
   ExportStatus,
   RuntimeStatus,
+  OperationalReadiness,
+  ReadinessBlocker,
 } from "./types.ts";
 
 /* ============================ assertion primitives ============================ */
@@ -88,6 +92,20 @@ type _BrokerHealth = Assert<MutuallyAssignable<BrokerHealthView, BrokerHealthCon
 // GET /api/runtime/status — top-level and per-broker element are closed and match exactly.
 type _BrokerRuntime = Assert<MutuallyAssignable<BrokerTokenRuntime, BrokerRuntimeStatusContract>>;
 type _RuntimeStatus = Assert<MutuallyAssignable<RuntimeStatus, RuntimeStatusContract>>;
+
+/*
+ * SECTION 7 / contract v1.6.0 — THE ONE AUTHORITATIVE READINESS DECISION.
+ *
+ * Asserted WHOLE-OBJECT in both directions, not field-curated: the schema is fully CLOSED here
+ * deliberately, because every field is a permission, a lifecycle, a blocker or a freshness fact the
+ * dashboard renders as an operational claim. A silently added, renamed or retyped field would be a
+ * silently changed permission — so it must fail `tsc -b` rather than degrade at runtime.
+ *
+ * This is also what keeps defect (b) from returning: the frontend cannot quietly stop reading
+ * `entry.permitted` (or start reading a field the backend does not send) without breaking the build.
+ */
+type _ReadinessBlocker = Assert<MutuallyAssignable<ReadinessBlocker, ReadinessBlockerContract>>;
+type _OperationalReadiness = Assert<MutuallyAssignable<OperationalReadiness, OperationalReadinessContract>>;
 
 // The shared arm-verdict shape ({ ok, blockers:[{code,detail}] }) — closed.
 type _ArmVerdict = Assert<
@@ -270,6 +288,9 @@ export type __ContractAssertProof = [
   _BrokerHealth,
   _BrokerRuntime,
   _RuntimeStatus,
+  // SECTION 7 / contract v1.6.0 — the ONE readiness decision and its blocker element.
+  _ReadinessBlocker,
+  _OperationalReadiness,
   _ArmVerdict,
   _ExportStatus,
   _BrokerSession,

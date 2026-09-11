@@ -31,12 +31,20 @@ import type {
   ExecutionFunnelSnapshot,
   MarketDataHealth,
   MarketDataState,
+  OperationalReadiness,
   OrderStreamBrokerStatus,
   OrderStreamStatus,
 } from "../api/types.ts";
 
-/** A health BAND, ordered by severity. Rendered with DISTINCT wording, icon AND colour. */
-export type HealthBand = "ready" | "paused" | "broken" | "absent";
+/**
+ * A health BAND, ordered by severity. Rendered with DISTINCT wording, icon AND colour.
+ *
+ * `unknown` (SECTION 7) is NOT a cosmetic addition. It is the band for "the backend published no
+ * decision, or the refresh that would have confirmed this one failed". Before it existed the only
+ * options were a green light or a fault, so missing evidence was rendered as one or the other —
+ * and a UI that cannot say "I do not know" will eventually say something false.
+ */
+export type HealthBand = "ready" | "paused" | "broken" | "absent" | "unknown";
 
 /** A market-data readiness view for the ACTIVE broker's feed. */
 export interface MarketDataView {
@@ -124,6 +132,13 @@ export interface OrderStreamBrokerView {
   streamObserved: boolean;
   reconcilePending: boolean;
   detail: string;
+  /**
+   * SECTION 7 — the AUTHORITATIVE lifecycle from the backend, or null when nothing consumes the
+   * stream. Surfaced so the panel can name the actual state instead of only the mechanism label:
+   * "REST polling only" is true of a disabled stream AND of a degraded one, and an operator needs
+   * to know which.
+   */
+  lifecycle: OrderStreamBrokerStatus["lifecycle"];
 }
 
 const WIRING_LABEL: Record<OrderStreamBrokerStatus["wiring"], string> = {
@@ -133,8 +148,20 @@ const WIRING_LABEL: Record<OrderStreamBrokerStatus["wiring"], string> = {
   armed: "armed",
 };
 
+/**
+ * The band for one broker's order stream.
+ *
+ * SECTION 7: scored from the AUTHORITATIVE `lifecycle` when the backend publishes it, and only from
+ * the mechanism label otherwise. That matters because `rest_polling_only` covers both "no stream is
+ * configured, REST is the documented baseline" (absent — not a fault) and "the stream is armed but
+ * DEGRADED / DISCONNECTED / session-expired" (a real fault). Reading the two alike is how a broken
+ * fast path rendered as a design choice.
+ */
 export function orderStreamBrokerBand(b: OrderStreamBrokerStatus): HealthBand {
   if (b.fills_observed_by === "stream_primary_rest_reconcile") return "ready";
+  // An expired session behind the order stream is BROKEN, not merely paused: reconnecting with a
+  // rejected credential cannot succeed, so it will not clear on its own.
+  if (b.lifecycle === "AUTH_EXPIRED") return "broken";
   // A wired-but-idle stream, or one that is armed yet reconnecting, is "paused" — fills are still
   // observed by REST polling, so exposure remains manageable, but it is NOT the fast path.
   if (b.wiring === "not_built" || b.wiring === "gated_off") return "absent";
@@ -154,6 +181,7 @@ export function deriveOrderStreamBroker(b: OrderStreamBrokerStatus): OrderStream
     streamObserved: b.fills_observed_by === "stream_primary_rest_reconcile",
     reconcilePending: b.health?.reconcilePending ?? false,
     detail: b.detail,
+    lifecycle: b.lifecycle ?? null,
   };
 }
 
@@ -173,61 +201,111 @@ export function deriveActiveOrderStream(
 }
 
 /**
- * WHY ENTRY IS PAUSED — a combined, operator-readable reason list derived from the two INDEPENDENT
- * transports, plus whether existing positions remain manageable.
+ * WHY ENTRY IS PAUSED — RENDERED FROM THE BACKEND DECISION, not derived here.
  *
- * Mirrors the intent of the backend `permissionBlocks` / permission matrix: NEW ENTRY needs the
- * most evidence (both transports READY); EXIT and PROTECTIVE CANCEL need far less, so a paused feed
- * still leaves a live position manageable. This is what makes "paused-but-safe" visually and
- * semantically distinct from "broken".
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * DEFECT (b): THIS FUNCTION USED TO BE A SECOND PERMISSION MATRIX
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * It decided `entryPermitted` from exactly two things: whether market data was READY, and whether
+ * the order stream owed a reconciliation. That missed nearly every real blocker — a stopped scanner,
+ * a disarmed entry control, an unready token, unavailable PostgreSQL, pending migrations, an active
+ * recovery pass, unreconciled orders, a spent session budget — and it missed a DEGRADED order-stream
+ * lifecycle entirely. Pre-fix, with the backend refusing entry and the order stream DEGRADED, this
+ * returned `entryPermitted: true`, `overallBand: "ready"`, `entryPausedReasons: []`, and the panel
+ * rendered a green "New entry is permitted".
+ *
+ * Two independent permission matrices cannot be kept in agreement; the only fix is to have one. The
+ * backend now publishes a single authoritative decision (`box_status.operational_readiness`, built by
+ * the SAME permission table its live-entry checkpoint enforces), and this function RENDERS it.
+ *
+ * WHAT REMAINS LOCAL, AND WHY THAT IS NOT A SECOND MATRIX
+ * The two transport BANDS (`md.band`, `os.band`) are still computed here, because they are
+ * PRESENTATION — which colour and glyph a transport region gets. They no longer decide any
+ * permission. The verdict, the reasons and the manageability answer all come from `decision`.
+ *
+ * A MISSING DECISION IS "UNKNOWN", NEVER GREEN
+ * If `decision` is absent (an older backend, or a status that has not loaded), the gate reports the
+ * `unknown` band with entry NOT permitted. Degrading to a green light on missing evidence is the
+ * exact failure this whole section exists to remove.
  */
 export interface EntryGate {
-  /** True only when BOTH transports permit new entry (market data READY; order stream not broken). */
+  /** The BACKEND's verdict on new entry. Never computed locally. */
   entryPermitted: boolean;
-  /** One sentence per reason entry is paused/blocked. Empty when entry is permitted. */
+  /** The backend's reasons, verbatim. Empty when entry is permitted. */
   entryPausedReasons: string[];
-  /** True when existing positions can still be exited/reduced/cancelled despite a paused feed. */
+  /**
+   * Whether existing positions can still be exited/reduced — the BACKEND's `exit_and_reduce`.
+   *
+   * Note this is deliberately NOT `entryPermitted`-derived: entry-scoped restrictions must never
+   * make a live position look unmanageable.
+   */
   positionsManageable: boolean;
-  /** The worse of the two transport bands — drives the headline tone. */
+  /** Whether a protective cancel is still accepted (it reduces exposure, so it is broadest). */
+  protectiveCancelPermitted: boolean;
+  /** The headline tone. `unknown` when the backend published no decision to render. */
   overallBand: HealthBand;
+  /** True when there is NO backend decision to render — show unknown, never ready. */
+  decisionMissing: boolean;
+  /** The backend's real limitations on reduction, stated rather than implied. */
+  exposureLimitations: readonly string[];
+  /** Reasons a REDUCTION is refused (backend, reduction-scoped only). Empty when permitted. */
+  reductionBlockedReasons: string[];
 }
 
-export function deriveEntryGate(md: MarketDataView, os: OrderStreamBrokerView | null): EntryGate {
-  const reasons: string[] = [];
+/**
+ * The band the HEADLINE takes, from the backend decision.
+ *
+ * `broken` is reserved for the case where exposure management itself is impaired — that is the only
+ * situation an operator must treat as an emergency. Entry being refused while positions remain fully
+ * manageable is `paused`: serious, but not the same thing, and rendering them alike is what teaches
+ * an operator to ignore both.
+ */
+function headlineBand(decision: OperationalReadiness): HealthBand {
+  if (!decision.exposure_management.exit_and_reduce) return "broken";
+  if (!decision.entry.permitted) return "paused";
+  return "ready";
+}
 
-  // Market data must be READY for entry.
-  if (md.band !== "ready") {
-    if (md.state === "DISABLED") reasons.push("market data is not configured");
-    else if (md.band === "paused") reasons.push(`market data is ${md.label.toLowerCase()} (fresh depth per traded instrument not yet proven)`);
-    else reasons.push(`market data is ${md.label.toLowerCase()}`);
+export function deriveEntryGate(
+  md: MarketDataView,
+  os: OrderStreamBrokerView | null,
+  decision: OperationalReadiness | null | undefined,
+): EntryGate {
+  if (!decision) {
+    // NO DECISION ⇒ NO CLAIM. The transports may look perfect; without the backend's verdict the
+    // honest answer is "unknown", and entry is reported as not permitted because the UI has no
+    // authority to say otherwise.
+    return {
+      entryPermitted: false,
+      entryPausedReasons: [
+        "The backend has not published a readiness decision, so entry permission is UNKNOWN. " +
+          "Nothing here should be read as permission.",
+      ],
+      positionsManageable: false,
+      protectiveCancelPermitted: false,
+      overallBand: "unknown",
+      decisionMissing: true,
+      exposureLimitations: [],
+      reductionBlockedReasons: [],
+    };
   }
 
-  // The order stream blocks entry only when it is genuinely broken/reconnecting. A DISABLED or
-  // gated-off stream is NOT a fault — REST polling is the documented fallback — so it does not
-  // pause entry by itself; it is reported as a slower fill path, not a block.
-  if (os) {
-    if (os.reconcilePending) {
-      reasons.push("the order-update stream reconnected and a REST reconciliation is owed");
-    }
-  }
-
-  // A market-data feed that is broken (disconnected / session expired) is the case where existing
-  // positions may NOT be freely manageable: an expired session means the broker refuses all but a
-  // cancel, and a disconnected feed cannot price a reduction. DEGRADED / reconnecting still permit
-  // exit and cancel, so positions remain manageable there.
-  const positionsManageable = md.state !== "AUTH_EXPIRED";
-
-  const overallBand: HealthBand =
-    md.band === "broken" || (os?.band === "broken") ? "broken"
-      : md.band === "paused" || os?.reconcilePending ? "paused"
-      : md.band === "absent" ? "absent"
-      : "ready";
+  // The backend's own sentences, verbatim. Re-phrasing them here would reintroduce a second
+  // vocabulary for one decision, and a UI sentence that drifts from the enforced rule is a lie
+  // with better grammar. `md`/`os` are still consulted for the per-transport LABELS the panel
+  // renders beside this banner — never for the verdict.
+  void md;
+  void os;
 
   return {
-    entryPermitted: reasons.length === 0 && md.band === "ready",
-    entryPausedReasons: reasons,
-    positionsManageable,
-    overallBand,
+    entryPermitted: decision.entry.permitted,
+    entryPausedReasons: decision.entry.reasons.map((r) => r.detail),
+    positionsManageable: decision.exposure_management.exit_and_reduce,
+    protectiveCancelPermitted: decision.exposure_management.protective_cancel,
+    overallBand: headlineBand(decision),
+    decisionMissing: false,
+    exposureLimitations: decision.exposure_management.limitations,
+    reductionBlockedReasons: decision.exposure_management.blocked_reasons.map((r) => r.detail),
   };
 }
 
@@ -341,6 +419,10 @@ export function bandClass(band: HealthBand): string {
       return "is-warn";
     case "broken":
       return "is-bad";
+    case "unknown":
+      // Deliberately the WARN tone, not the neutral one: "we do not know" is a caution, and
+      // rendering it neutrally is how an unknown state gets mistaken for a benign one.
+      return "is-warn";
     case "absent":
       return "";
   }
@@ -355,6 +437,8 @@ export function bandGlyph(band: HealthBand): string {
       return "◐";
     case "broken":
       return "○";
+    case "unknown":
+      return "?";
     case "absent":
       return "—";
   }

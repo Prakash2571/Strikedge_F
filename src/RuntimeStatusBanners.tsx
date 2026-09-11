@@ -27,6 +27,7 @@
  */
 
 import type { BrokerTokenRuntime, ExportStatus, RuntimeStatus } from "./api/types.ts";
+import type { RefreshState } from "./lib/statusIntegrity.ts";
 
 type Banner = { key: string; kind: "info" | "warn" | "error"; text: string };
 
@@ -38,6 +39,23 @@ const ENTRY_REASON_TEXT: Record<string, string> = {
   postgres_unavailable: "PostgreSQL is unavailable",
   reconciliation_incomplete: "reconciliation is incomplete",
   active_broker_token_not_ready: "the active broker has no valid token yet",
+  // SECTION 7 / contract v1.6.0: `live_entry.reasons` is now a projection of the ONE readiness
+  // decision, so the TRANSPORT lifecycles finally reach this list. Before the unification the
+  // runtime endpoint computed its verdict from env/DB/token facts alone and could not see either
+  // transport at all — it reported entry unblocked while the engine refused every entry.
+  market_data_lifecycle: "the market-data feed is not ready for entry",
+  market_data_disconnected: "the market-data socket is disconnected",
+  market_data_not_configured: "market data is not configured",
+  market_data_session_expired: "the market-data session or token has expired",
+  order_stream_lifecycle: "the order-update stream is not delivering",
+  order_stream_session_expired: "the order-update stream's session has expired",
+  order_stream_reconciliation_owed: "a REST reconciliation of the order-update gap is owed",
+  scanner_stopped: "the scanner is stopped (entry only — positions stay monitored)",
+  market_closed: "the exchange is closed",
+  entry_disabled: "the live ENTRY control is disarmed",
+  recovery_active: "a crash-recovery pass is still resolving unknown orders",
+  migrations_pending: "database migrations are still pending",
+  readiness_evidence_unavailable: "the readiness evidence could not be read (treated as blocking)",
 };
 
 function describeEntryReason(code: string): string {
@@ -50,11 +68,34 @@ function describeEntryReason(code: string): string {
 export function RuntimeStatusBanners({
   runtime,
   exportStatus,
+  refresh,
 }: {
   runtime: RuntimeStatus | null;
   exportStatus: ExportStatus | null;
+  /**
+   * SECTION 7 — how much to trust what follows.
+   *
+   * Optional so the component still renders for a caller that has no tracker, but when supplied a
+   * STALE or UNKNOWN verdict emits its own banner FIRST. That ordering matters: a reader who sees
+   * "this reading is 40s old and the last 4 refreshes failed" interprets everything below it
+   * differently, and the previous `.catch(() => {})` gave them no way to know.
+   */
+  refresh?: RefreshState;
 }) {
   const banners: Banner[] = [];
+
+  // (0) FRESHNESS FIRST. A failed or expired refresh is itself the most important fact on screen:
+  // every banner below is only as true as its last successful fetch.
+  if (refresh && refresh.freshness !== "fresh") {
+    banners.push({
+      key: "readiness-freshness",
+      kind: refresh.freshness === "unknown" ? "error" : "warn",
+      text:
+        refresh.freshness === "unknown"
+          ? `Readiness is UNKNOWN. ${refresh.detail} Do not read the absence of a warning as an all-clear.`
+          : `Readiness may be STALE. ${refresh.detail} Every statement below is only as current as that.`,
+    });
+  }
 
   if (runtime) {
     const active: BrokerTokenRuntime | undefined = runtime.brokers.find(
